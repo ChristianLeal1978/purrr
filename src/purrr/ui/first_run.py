@@ -16,6 +16,7 @@ class SourcesView(Gtk.Box):
         "connect-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "add-folder-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "rescan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str, str)),
+        "metadata-scan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "delete-source-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
     }
 
@@ -92,6 +93,14 @@ class SourcesView(Gtk.Box):
                     "rescan-requested", s["id"], s["drive_folder_id"], s["display_name"]
                 ),
             )
+            metadata_button = Gtk.Button(
+                icon_name="text-x-generic-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Leer etiquetas (título/artista/álbum) sin descargar el audio completo",
+            )
+            metadata_button.connect(
+                "clicked", lambda _b, s=source: self.emit("metadata-scan-requested", s["id"])
+            )
             delete_button = Gtk.Button(
                 icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Eliminar fuente"
             )
@@ -99,5 +108,6 @@ class SourcesView(Gtk.Box):
                 "clicked", lambda _b, s=source: self.emit("delete-source-requested", s["id"])
             )
             row.add_suffix(rescan_button)
+            row.add_suffix(metadata_button)
             row.add_suffix(delete_button)
             self._sources_list.append(row)

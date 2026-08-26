@@ -48,12 +48,14 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._queue = PlayQueue()
         self._sync_controller = SyncController()
         self._current_playlist_id: int | None = None
+        self._current_search_text: str | None = None
+        self._track_updated_source_id: int | None = None
 
         self._sidebar = Sidebar()
         self._library_view = LibraryView()
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
-        self._playback_bar = PlaybackBar(self._engine, self._queue)
+        self._playback_bar = PlaybackBar(self._engine, self._queue, self._sync_controller)
 
         self._connect_signals()
         self._build_layout()
@@ -101,11 +103,14 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.connect("connect-requested", self._on_connect_requested)
         self._sources_view.connect("add-folder-requested", self._on_add_folder_requested)
         self._sources_view.connect("rescan-requested", self._on_rescan_requested)
+        self._sources_view.connect("metadata-scan-requested", self._on_metadata_scan_requested)
         self._sources_view.connect("delete-source-requested", self._on_delete_source_requested)
 
         self._sync_controller.connect("progress", self._on_sync_progress)
         self._sync_controller.connect("finished", self._on_sync_finished)
         self._sync_controller.connect("error", self._on_sync_error)
+        self._sync_controller.connect("track-updated", self._on_track_updated)
+        self._sync_controller.connect("metadata-scan-finished", self._on_metadata_scan_finished)
 
         self._playback_bar.connect("playback-error", self._on_playback_error)
 
@@ -149,7 +154,8 @@ class PurrrWindow(Adw.ApplicationWindow):
     # --- Biblioteca / reproducción ---------------------------------------
 
     def _on_library_search_changed(self, _view, text: str) -> None:
-        self._library_view.refresh(database.list_tracks(filter_text=text or None))
+        self._current_search_text = text or None
+        self._library_view.refresh(database.list_tracks(filter_text=self._current_search_text))
 
     def _on_library_track_activated(self, _view, track_id: int) -> None:
         tracks = self._library_view.get_visible_tracks()
@@ -160,14 +166,15 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._play_from_track_list(tracks, track_id)
 
     def _play_from_track_list(self, tracks, track_id: int) -> None:
-        playable = [t for t in tracks if t.cache_status == "cached" and t.local_path]
-        index = next((i for i, t in enumerate(playable) if t.track_id == track_id), None)
+        index = next((i for i, t in enumerate(tracks) if t.track_id == track_id), None)
         if index is None:
-            self._toast("Esa canción todavía no está descargada.")
             return
         items = [
-            QueueItem(t.track_id, t.title, t.artist, t.local_path, t.duration_seconds)
-            for t in playable
+            QueueItem(
+                t.track_id, t.drive_file_id, t.title, t.artist, t.album,
+                t.local_path, t.duration_seconds, t.art_path,
+            )
+            for t in tracks
         ]
         self._queue.set_queue(items, index)
         self._playback_bar.play_queue_item(self._queue.current())
@@ -232,6 +239,14 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_rescan_requested(self, _view, _source_id: int, folder_id: str, display_name: str) -> None:
         self._sync_controller.start_scan(folder_id, display_name)
 
+    def _on_metadata_scan_requested(self, _view, source_id: int) -> None:
+        self._sync_controller.start_metadata_scan(source_id)
+
+    def _on_metadata_scan_finished(self, _controller, updated: int, total: int) -> None:
+        self._sources_view.hide_progress()
+        self._reload_all()
+        self._toast(f"Etiquetas leídas: {updated} de {total} canciones actualizadas.")
+
     def _on_delete_source_requested(self, _view, source_id: int) -> None:
         database.delete_source(source_id)
         self._sources_view.refresh_sources(database.list_sources())
@@ -240,14 +255,30 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_sync_progress(self, _controller, stage: str, actual: int, total: int) -> None:
         self._sources_view.show_progress(stage, actual, total)
 
-    def _on_sync_finished(self, _controller, total: int, errors: int) -> None:
+    def _on_sync_finished(self, _controller, total: int) -> None:
         self._sources_view.hide_progress()
         self._reload_all()
-        self._toast(f"Sincronización completa: {total} archivos, {errors} errores.")
+        self._toast(f"Sincronización completa: {total} canciones encontradas.")
 
     def _on_sync_error(self, _controller, message: str) -> None:
         self._sources_view.hide_progress()
         self._toast(f"Error al sincronizar: {message}")
+
+    def _on_track_updated(self, _controller, _track_id: int) -> None:
+        # Una o más canciones terminaron de actualizarse en segundo plano (reproducción, precarga,
+        # o un escaneo de metadatos que puede disparar esta señal cientos de veces seguidas). Se
+        # agrupan (debounce) para no reconstruir toda la tabla de la biblioteca por cada una —
+        # eso congelaba la ventana durante un escaneo de metadatos grande.
+        if self._track_updated_source_id is not None:
+            GLib.source_remove(self._track_updated_source_id)
+        self._track_updated_source_id = GLib.timeout_add(400, self._refresh_after_track_updates)
+
+    def _refresh_after_track_updates(self) -> bool:
+        self._track_updated_source_id = None
+        self._library_view.refresh(database.list_tracks(filter_text=self._current_search_text))
+        if self._current_playlist_id is not None:
+            self._on_playlist_selected(self._sidebar, self._current_playlist_id)
+        return False
 
     def _on_playback_error(self, _bar, message: str) -> None:
         self._toast(f"Error de reproducción: {message}")

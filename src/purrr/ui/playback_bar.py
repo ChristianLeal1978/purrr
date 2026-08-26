@@ -7,6 +7,7 @@ from gi.repository import GObject, Gtk
 
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
+from purrr.sync.controller import SyncController
 
 
 def _format_time(seconds: float) -> str:
@@ -17,13 +18,16 @@ def _format_time(seconds: float) -> str:
 class PlaybackBar(Gtk.Box):
     __gsignals__ = {
         "playback-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "now-playing-changed": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # QueueItem
     }
 
-    def __init__(self, engine: PlayerEngine, queue: PlayQueue):
+    def __init__(self, engine: PlayerEngine, queue: PlayQueue, sync_controller: SyncController):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.engine = engine
         self.queue = queue
+        self._sync_controller = sync_controller
         self._dragging = False
+        self._pending_track_id: int | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
@@ -36,14 +40,23 @@ class PlaybackBar(Gtk.Box):
         self.set_margin_end(12)
 
         # --- Fila de metadatos + barra de progreso -------------------------
+        self._art_picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER)
+        self._art_picture.set_size_request(48, 48)
+        self._art_picture.add_css_class("card")
+        self._art_picture.set_visible(False)
+
         self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.START, xalign=0)
         self._title_label.add_css_class("heading")
         self._artist_label = Gtk.Label(label="", halign=Gtk.Align.START, xalign=0)
         self._artist_label.add_css_class("dim-label")
 
-        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
-        info_box.append(self._title_label)
-        info_box.append(self._artist_label)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        text_box.append(self._title_label)
+        text_box.append(self._artist_label)
+
+        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, hexpand=True)
+        info_box.append(self._art_picture)
+        info_box.append(text_box)
 
         self._position_label = Gtk.Label(label="0:00")
         self._duration_label = Gtk.Label(label="0:00")
@@ -109,6 +122,21 @@ class PlaybackBar(Gtk.Box):
         self._set_controls_sensitive(False)
 
     def play_queue_item(self, item: QueueItem) -> None:
+        self._pending_track_id = item.track_id
+        if item.local_path and Path(item.local_path).exists():
+            self._start_playback(item)
+            self._prefetch_next()
+        else:
+            self._show_downloading(item)
+            self._sync_controller.download_track(
+                item.track_id,
+                on_complete=lambda local_path, art_path: self._on_download_complete(
+                    item, local_path, art_path
+                ),
+                on_error=lambda message: self._on_download_error(item, message),
+            )
+
+    def _start_playback(self, item: QueueItem) -> None:
         self.engine.load(Path(item.local_path))
         self.engine.play()
         self._title_label.set_text(item.title)
@@ -117,6 +145,64 @@ class PlaybackBar(Gtk.Box):
         self._duration_label.set_text(_format_time(item.duration_seconds))
         self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
         self._set_controls_sensitive(True)
+        self._update_art(item.art_path)
+        self.emit("now-playing-changed", item)
+
+    def _update_art(self, art_path: str | None) -> None:
+        if art_path and Path(art_path).exists():
+            self._art_picture.set_filename(art_path)
+            self._art_picture.set_visible(True)
+        else:
+            self._art_picture.set_visible(False)
+
+    def _show_downloading(self, item: QueueItem) -> None:
+        self._title_label.set_text(f"Descargando: {item.title}…")
+        self._artist_label.set_text(item.artist or "")
+        self._update_art(item.art_path)
+        self._set_controls_sensitive(False)
+
+    def _on_download_complete(self, item: QueueItem, local_path: str, art_path: str | None) -> None:
+        if self._pending_track_id != item.track_id:
+            return  # el usuario ya cambió de canción mientras se descargaba esta
+        item.local_path = local_path
+        if art_path:
+            item.art_path = art_path
+        self._start_playback(item)
+        self._prefetch_next()
+
+    def _on_download_error(self, item: QueueItem, message: str) -> None:
+        if self._pending_track_id == item.track_id:
+            self._title_label.set_text("Sin reproducción")
+            self._artist_label.set_text("")
+        self.emit("playback-error", f"No se pudo descargar «{item.title}»: {message}")
+
+    def _prefetch_next(self) -> None:
+        next_item = self.queue.peek_next()
+        if next_item and not (next_item.local_path and Path(next_item.local_path).exists()):
+            self._sync_controller.download_track(
+                next_item.track_id,
+                on_complete=lambda local_path, art_path, i=next_item: (
+                    setattr(i, "local_path", local_path),
+                    setattr(i, "art_path", art_path) if art_path else None,
+                ),
+            )
+
+    # --- API pública (también usada por el servicio MPRIS) ------------------
+
+    def play_pause(self) -> None:
+        self._on_play_pause_clicked(None)
+
+    def next(self) -> None:
+        self._on_next_clicked(None)
+
+    def previous(self) -> None:
+        self._on_previous_clicked(None)
+
+    def is_playing(self) -> bool:
+        return self._play_pause_button.get_icon_name() == "media-playback-pause-symbolic"
+
+    def current_position(self) -> float:
+        return self.engine.get_position() or 0.0
 
     def _set_controls_sensitive(self, sensitive: bool) -> None:
         for widget in (self._prev_button, self._play_pause_button, self._next_button, self._scale):

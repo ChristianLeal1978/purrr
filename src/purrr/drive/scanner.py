@@ -1,16 +1,20 @@
+import re
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from googleapiclient.discovery import Resource
 
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
-_AUDIO_QUERY = (
+_ENTRY_QUERY = (
     "'{folder_id}' in parents and trashed = false and "
-    "(mimeType = '{folder_mime}' or fileExtension = 'mp3' or fileExtension = 'flac')"
+    "(mimeType = '{folder_mime}' or fileExtension = 'mp3' or fileExtension = 'flac' "
+    "or mimeType contains 'image/')"
 )
 _FIELDS = "nextPageToken, files(id, name, mimeType, parents, md5Checksum, modifiedTime, size)"
 _PAGE_SIZE = 1000
+_COVER_NAME_PATTERN = re.compile(r"(?i)^(cover|folder|albumart|front)\.(jpe?g|png)$")
 
 
 @dataclass
@@ -25,9 +29,22 @@ class DriveFile:
     folder_path: str
 
 
+@dataclass
+class DriveCoverFile:
+    """Una imagen de carátula de carpeta (cover.jpg, folder.png, etc.), no una canción."""
+
+    id: str
+    name: str
+    parents: list[str]
+
+
+def _looks_like_cover(name: str) -> bool:
+    return bool(_COVER_NAME_PATTERN.match(name))
+
+
 def _list_children(service: Resource, folder_id: str) -> Iterator[dict]:
     page_token = None
-    query = _AUDIO_QUERY.format(folder_id=folder_id, folder_mime=FOLDER_MIME_TYPE)
+    query = _ENTRY_QUERY.format(folder_id=folder_id, folder_mime=FOLDER_MIME_TYPE)
     while True:
         response = (
             service.files()
@@ -50,8 +67,13 @@ def scan_folder_tree(
     service: Resource,
     root_folder_id: str,
     on_progress: Callable[[int, str], None] | None = None,
-) -> Iterator[DriveFile]:
-    """Recorre recursivamente (BFS) una carpeta de Drive y produce los archivos .mp3/.flac encontrados."""
+) -> Iterator[DriveFile | DriveCoverFile]:
+    """Recorre recursivamente (BFS) una carpeta de Drive.
+
+    Produce los archivos .mp3/.flac encontrados (`DriveFile`) y, cuando detecta una imagen de
+    carátula (cover.jpg, folder.png, etc.) en una carpeta, también un `DriveCoverFile` — el
+    llamador decide qué hacer con cada tipo.
+    """
     queue: deque[tuple[str, str]] = deque([(root_folder_id, "")])
     visited: set[str] = {root_folder_id}
     files_found = 0
@@ -64,6 +86,16 @@ def scan_folder_tree(
                     continue
                 visited.add(item["id"])
                 queue.append((item["id"], f"{folder_path}/{item['name']}"))
+                continue
+
+            if item["mimeType"].startswith("image/"):
+                if _looks_like_cover(item["name"]):
+                    yield DriveCoverFile(
+                        id=item["id"], name=item["name"], parents=item.get("parents", [])
+                    )
+                continue
+
+            if Path(item["name"]).suffix.lower() not in (".mp3", ".flac"):
                 continue
 
             files_found += 1

@@ -8,8 +8,10 @@ class QueueItem:
     drive_file_id: str
     title: str
     artist: str
+    album: str
     local_path: str | None
     duration_seconds: float
+    art_path: str | None = None
 
 
 class PlayQueue:

@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     year                 INTEGER,
     genre                TEXT,
     duration_seconds     REAL,
+    art_path             TEXT,
+    folder_cover_file_id TEXT,
+    folder_cover_ext     TEXT,
     added_at             TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );

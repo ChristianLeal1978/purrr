@@ -4,7 +4,7 @@ from importlib import resources
 
 from purrr.config import DB_PATH
 from purrr.drive.scanner import DriveFile
-from purrr.metadata.extractor import TrackMetadata
+from purrr.metadata.extractor import PartialMetadata, TrackMetadata
 
 _local = threading.local()
 
@@ -14,6 +14,7 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -24,9 +25,27 @@ def get_connection() -> sqlite3.Connection:
     return _local.conn
 
 
+_TRACK_COLUMN_MIGRATIONS = {
+    "art_path": "ALTER TABLE tracks ADD COLUMN art_path TEXT",
+    "folder_cover_file_id": "ALTER TABLE tracks ADD COLUMN folder_cover_file_id TEXT",
+    "folder_cover_ext": "ALTER TABLE tracks ADD COLUMN folder_cover_ext TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Agrega columnas nuevas a bases de datos ya existentes (CREATE TABLE IF NOT EXISTS no las toca)."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+    for column, statement in _TRACK_COLUMN_MIGRATIONS.items():
+        if column not in existing:
+            conn.execute(statement)
+    conn.commit()
+
+
 def init_db() -> None:
     schema = resources.files("purrr.db").joinpath("schema.sql").read_text()
-    get_connection().executescript(schema)
+    conn = get_connection()
+    conn.executescript(schema)
+    _migrate(conn)
 
 
 # --- Sources -----------------------------------------------------------
@@ -117,6 +136,15 @@ def list_pending_tracks(source_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_tracks_needing_metadata(source_id: int) -> list[sqlite3.Row]:
+    """Tracks sin descargar todavía y sin etiquetas leídas — candidatos para lectura parcial."""
+    return get_connection().execute(
+        "SELECT * FROM tracks WHERE source_id = ? AND cache_status = 'pending' AND title IS NULL "
+        "ORDER BY file_name",
+        (source_id,),
+    ).fetchall()
+
+
 def update_track_cache(
     drive_file_id: str,
     *,
@@ -156,6 +184,66 @@ def update_track_metadata(drive_file_id: str, metadata: TrackMetadata) -> None:
             drive_file_id,
         ),
     )
+    conn.commit()
+
+
+def update_track_partial_metadata(drive_file_id: str, metadata: PartialMetadata) -> None:
+    """Igual que update_track_metadata, pero solo pisa los campos que sí se pudieron leer
+    (COALESCE) — para no perder datos ya conocidos con los None de una lectura parcial."""
+    conn = get_connection()
+    conn.execute(
+        """
+        UPDATE tracks SET
+            title = COALESCE(?, title),
+            artist = COALESCE(?, artist),
+            album = COALESCE(?, album),
+            album_artist = COALESCE(?, album_artist),
+            track_number = COALESCE(?, track_number),
+            disc_number = COALESCE(?, disc_number),
+            year = COALESCE(?, year),
+            genre = COALESCE(?, genre),
+            duration_seconds = COALESCE(?, duration_seconds),
+            updated_at = datetime('now')
+        WHERE drive_file_id = ?
+        """,
+        (
+            metadata.title,
+            metadata.artist,
+            metadata.album,
+            metadata.album_artist,
+            metadata.track_number,
+            metadata.disc_number,
+            metadata.year,
+            metadata.genre,
+            metadata.duration_seconds,
+            drive_file_id,
+        ),
+    )
+    conn.commit()
+
+
+def update_track_art(drive_file_id: str, art_path: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE tracks SET art_path = ?, updated_at = datetime('now') WHERE drive_file_id = ?",
+        (art_path, drive_file_id),
+    )
+    conn.commit()
+
+
+def set_folder_covers(source_id: int, folder_covers: dict[str, tuple[str, str]]) -> None:
+    """folder_covers: {drive_parent_id: (cover_drive_file_id, extensión_ej_'.jpg')}.
+
+    Solo llena folder_cover_file_id en tracks que todavía no tenían uno asignado, para no
+    pisar el de un escaneo previo si esta vez la carpeta no trajo covers (por una query parcial).
+    """
+    conn = get_connection()
+    for parent_id, (cover_id, cover_ext) in folder_covers.items():
+        conn.execute(
+            "UPDATE tracks SET folder_cover_file_id = ?, folder_cover_ext = ? "
+            "WHERE source_id = ? AND drive_parent_id = ? AND folder_cover_file_id IS NULL",
+            (cover_id, cover_ext, source_id, parent_id),
+        )
     conn.commit()
 
 

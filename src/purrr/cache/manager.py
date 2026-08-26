@@ -6,13 +6,31 @@ from pathlib import Path
 from googleapiclient.discovery import Resource
 from googleapiclient.http import MediaIoBaseDownload
 
-from purrr.config import AUDIO_CACHE_DIR
+from purrr.config import ART_CACHE_DIR, AUDIO_CACHE_DIR
 from purrr.drive.scanner import DriveFile
+
+_MIME_TO_EXT = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png"}
 
 
 def cache_path_for(drive_file_id: str, file_name: str) -> Path:
     ext = Path(file_name).suffix or ".bin"
     return AUDIO_CACHE_DIR / f"{drive_file_id}{ext}"
+
+
+def art_cache_path(key: str, ext: str) -> Path:
+    return ART_CACHE_DIR / f"{key}{ext or '.jpg'}"
+
+
+def save_art_bytes(data: bytes, mime: str, key: str) -> Path:
+    path = art_cache_path(key, _MIME_TO_EXT.get(mime, ".jpg"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def fetch_bytes(service: Resource, file_id: str) -> bytes:
+    """Descarga un archivo completo de una sola vez (para archivos chicos, como carátulas)."""
+    return service.files().get_media(fileId=file_id).execute(num_retries=3)
 
 
 def is_cached_and_current(drive_file: DriveFile, track_row) -> bool:
@@ -62,3 +80,11 @@ def download_file(
 
     os.replace(tmp_path, dest)
     return dest
+
+
+def fetch_partial_bytes(service: Resource, file_id: str, byte_count: int) -> bytes:
+    """Baja solo los primeros `byte_count` bytes de un archivo (para leer etiquetas sin
+    descargarlo completo). Usa un header Range crudo, no el downloader por chunks."""
+    request = service.files().get_media(fileId=file_id)
+    request.headers["Range"] = f"bytes=0-{byte_count - 1}"
+    return request.execute(num_retries=3)
