@@ -5,9 +5,10 @@ from dataclasses import dataclass
 @dataclass
 class QueueItem:
     track_id: int
+    drive_file_id: str
     title: str
     artist: str
-    local_path: str
+    local_path: str | None
     duration_seconds: float
 
 
@@ -49,6 +50,14 @@ class PlayQueue:
     def current(self) -> QueueItem | None:
         if 0 <= self._position < len(self._order):
             return self._items[self._order[self._position]]
+        return None
+
+    def peek_next(self) -> QueueItem | None:
+        """Mira la siguiente canción sin avanzar la posición (para precargar su descarga)."""
+        if self._position + 1 < len(self._order):
+            return self._items[self._order[self._position + 1]]
+        if self.repeat and self._order:
+            return self._items[self._order[0]]
         return None
 
     def has_next(self) -> bool:

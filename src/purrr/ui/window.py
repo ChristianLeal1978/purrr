@@ -8,10 +8,11 @@ from gi.repository import Adw, GLib, Gtk
 
 from purrr.auth.oauth import get_credentials
 from purrr.db import database
+from purrr.drive.client import get_service
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
-from purrr.ui.add_folder_dialog import show_add_folder_dialog
+from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
 from purrr.ui.library_view import LibraryView
 from purrr.ui.playback_bar import PlaybackBar
@@ -211,10 +212,22 @@ class PurrrWindow(Adw.ApplicationWindow):
         return False
 
     def _on_add_folder_requested(self, _view) -> None:
+        def worker() -> None:
+            try:
+                creds = get_credentials()
+                service = get_service(creds)
+                GLib.idle_add(self._open_folder_picker, service)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo conectar con Drive: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_folder_picker(self, service) -> bool:
         def on_confirm(folder_id: str, display_name: str) -> None:
             self._sync_controller.start_scan(folder_id, display_name)
 
-        show_add_folder_dialog(self, on_confirm)
+        DriveFolderPickerDialog(self, service, on_confirm).present()
+        return False
 
     def _on_rescan_requested(self, _view, _source_id: int, folder_id: str, display_name: str) -> None:
         self._sync_controller.start_scan(folder_id, display_name)
