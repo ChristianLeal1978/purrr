@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Secretos y datos locales del usuario — nunca commitear
+client_secret.json
+token.json
+*.db
+*.db-wal
+*.db-shm

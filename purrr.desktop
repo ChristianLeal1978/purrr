@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Purrr
+Comment=Reproductor de música desde Google Drive
+Exec=/home/christian/Proyectos/purrr/.venv/bin/purrr
+Icon=audio-x-generic
+Categories=Audio;Music;Player;GTK;
+Terminal=false
+StartupNotify=true

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "purrr"
+version = "0.1.0"
+description = "Reproductor de música GTK4/libadwaita para Fedora que escanea y reproduce audio desde Google Drive"
+requires-python = ">=3.11"
+dependencies = [
+    "mutagen>=1.47",
+    "google-auth>=2.53",
+    "google-auth-oauthlib>=1.4",
+    "google-api-python-client",
+    "google-auth-httplib2",
+]
+
+[project.scripts]
+purrr = "purrr.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+purrr = ["db/schema.sql"]
