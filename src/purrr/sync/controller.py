@@ -141,14 +141,21 @@ class SyncController(GObject.Object):
 
         GLib.idle_add(self.emit, "metadata-scan-finished", updated, total)
 
+    def _resolve_embedded_art(self, track_row, local_audio_path: Path) -> str | None:
+        """Solo arte embebido en el archivo de audio local — no requiere red."""
+        embedded = extract_embedded_art(local_audio_path)
+        if not embedded:
+            return None
+        data, mime = embedded
+        art_path = save_art_bytes(data, mime, key=track_row["drive_file_id"])
+        database.update_track_art(track_row["drive_file_id"], str(art_path))
+        return str(art_path)
+
     def _resolve_art(self, service, track_row, local_audio_path: Path) -> str | None:
         """Tras descargar el audio completo: intenta arte embebido, si no hay usa el de la carpeta."""
-        embedded = extract_embedded_art(local_audio_path)
-        if embedded:
-            data, mime = embedded
-            art_path = save_art_bytes(data, mime, key=track_row["drive_file_id"])
-            database.update_track_art(track_row["drive_file_id"], str(art_path))
-            return str(art_path)
+        embedded_art_path = self._resolve_embedded_art(track_row, local_audio_path)
+        if embedded_art_path:
+            return embedded_art_path
 
         if track_row["art_path"]:
             return track_row["art_path"]
@@ -226,8 +233,13 @@ class SyncController(GObject.Object):
                 and track_row["local_path"]
                 and Path(track_row["local_path"]).exists()
             ):
+                art_path = track_row["art_path"]
+                if not art_path:
+                    # Tracks cacheados antes de que existiera la extracción de carátula nunca
+                    # la recibieron — la resolvemos ahora, sin red, para no dejarla en blanco.
+                    art_path = self._resolve_embedded_art(track_row, Path(track_row["local_path"]))
                 if on_complete:
-                    GLib.idle_add(on_complete, track_row["local_path"], track_row["art_path"])
+                    GLib.idle_add(on_complete, track_row["local_path"], art_path)
                 return
 
             creds = get_credentials()

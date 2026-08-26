@@ -60,7 +60,9 @@ la sincronización. Los archivos se descargan y cachean en `~/.cache/purrr/audio
 cp io.github.christianlealreyes.Purrr.desktop ~/.local/share/applications/
 mkdir -p ~/.local/share/icons/hicolor/scalable/apps
 cp data/icons/io.github.christianlealreyes.Purrr.svg ~/.local/share/icons/hicolor/scalable/apps/
-gtk4-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
+# Si queda un icon-theme.cache viejo (de otra app) en ~/.local/share/icons/hicolor,
+# GTK lo usa en vez de escanear la carpeta y el ícono nuevo queda invisible.
+rm -f ~/.local/share/icons/hicolor/icon-theme.cache
 ```
 
 ## Estructura del proyecto
