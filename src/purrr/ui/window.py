@@ -9,6 +9,7 @@ from gi.repository import Adw, GLib, Gtk
 from purrr.auth.oauth import get_credentials
 from purrr.db import database
 from purrr.drive.client import get_service
+from purrr.mpris.service import MprisService
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
@@ -56,6 +57,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
         self._playback_bar = PlaybackBar(self._engine, self._queue, self._sync_controller)
+        self._mpris_service = MprisService(self._engine, self._queue, self._playback_bar)
 
         self._connect_signals()
         self._build_layout()

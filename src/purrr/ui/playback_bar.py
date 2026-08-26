@@ -3,16 +3,31 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GObject, Gtk
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GObject, Gtk
 
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
 
+_ART_THUMB_SIZE = 52  # ~alto combinado de título + artista
+_ART_EXPANDED_SIZE = 360
+
 
 def _format_time(seconds: float) -> str:
     total = int(seconds)
     return f"{total // 60}:{total % 60:02d}"
+
+
+def _load_texture_at_size(path: str, size: int) -> Gdk.Texture | None:
+    """Escala la imagen ANTES de dársela a Gtk.Picture — si le pasamos el archivo completo
+    (a veces 500px+ de carátula embebida), Picture usa esas dimensiones como tamaño natural
+    sin importar `set_size_request`, y termina empujando el layout de toda la barra."""
+    try:
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
+        return Gdk.Texture.new_for_pixbuf(pixbuf)
+    except Exception:
+        return None
 
 
 class PlaybackBar(Gtk.Box):
@@ -40,10 +55,18 @@ class PlaybackBar(Gtk.Box):
         self.set_margin_end(12)
 
         # --- Fila de metadatos + barra de progreso -------------------------
-        self._art_picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER)
-        self._art_picture.set_size_request(48, 48)
-        self._art_picture.add_css_class("card")
-        self._art_picture.set_visible(False)
+        self._current_art_path: str | None = None
+
+        self._art_picture = Gtk.Picture(
+            content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=False, vexpand=False
+        )
+        self._art_picture.set_size_request(_ART_THUMB_SIZE, _ART_THUMB_SIZE)
+
+        self._art_button = Gtk.Button(has_frame=False, valign=Gtk.Align.CENTER, tooltip_text="Ver carátula")
+        self._art_button.add_css_class("flat")
+        self._art_button.set_child(self._art_picture)
+        self._art_button.connect("clicked", self._on_art_clicked)
+        self._art_button.set_visible(False)
 
         self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.START, xalign=0)
         self._title_label.add_css_class("heading")
@@ -55,7 +78,7 @@ class PlaybackBar(Gtk.Box):
         text_box.append(self._artist_label)
 
         info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, hexpand=True)
-        info_box.append(self._art_picture)
+        info_box.append(self._art_button)
         info_box.append(text_box)
 
         self._position_label = Gtk.Label(label="0:00")
@@ -149,11 +172,31 @@ class PlaybackBar(Gtk.Box):
         self.emit("now-playing-changed", item)
 
     def _update_art(self, art_path: str | None) -> None:
+        self._current_art_path = art_path
         if art_path and Path(art_path).exists():
-            self._art_picture.set_filename(art_path)
-            self._art_picture.set_visible(True)
-        else:
-            self._art_picture.set_visible(False)
+            texture = _load_texture_at_size(art_path, _ART_THUMB_SIZE)
+            if texture:
+                self._art_picture.set_paintable(texture)
+                self._art_button.set_visible(True)
+                return
+        self._art_button.set_visible(False)
+
+    def _on_art_clicked(self, button: Gtk.Button) -> None:
+        if not self._current_art_path or not Path(self._current_art_path).exists():
+            return
+        texture = _load_texture_at_size(self._current_art_path, _ART_EXPANDED_SIZE)
+        if not texture:
+            return
+        picture = Gtk.Picture(
+            paintable=texture,
+            content_fit=Gtk.ContentFit.CONTAIN,
+            width_request=_ART_EXPANDED_SIZE,
+            height_request=_ART_EXPANDED_SIZE,
+        )
+        popover = Gtk.Popover()
+        popover.set_parent(button)
+        popover.set_child(picture)
+        popover.popup()
 
     def _show_downloading(self, item: QueueItem) -> None:
         self._title_label.set_text(f"Descargando: {item.title}…")

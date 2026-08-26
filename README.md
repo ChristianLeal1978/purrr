@@ -57,7 +57,10 @@ la sincronización. Los archivos se descargan y cachean en `~/.cache/purrr/audio
 ## Integrarlo al menú de GNOME (opcional)
 
 ```bash
-cp purrr.desktop ~/.local/share/applications/
+cp io.github.christianlealreyes.Purrr.desktop ~/.local/share/applications/
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+cp data/icons/io.github.christianlealreyes.Purrr.svg ~/.local/share/icons/hicolor/scalable/apps/
+gtk4-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
 ```
 
 ## Estructura del proyecto
