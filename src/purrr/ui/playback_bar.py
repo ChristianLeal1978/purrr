@@ -9,6 +9,7 @@ from gi.repository import Gdk, GdkPixbuf, GObject, Gtk
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
+from purrr.ui.waveform_scrubber import WaveformScrubber
 
 _ART_THUMB_SIZE = 52  # ~alto combinado de título + artista
 _ART_EXPANDED_SIZE = 360
@@ -41,14 +42,16 @@ class PlaybackBar(Gtk.Box):
         self.engine = engine
         self.queue = queue
         self._sync_controller = sync_controller
-        self._dragging = False
         self._pending_track_id: int | None = None
+        self._current_duration = 1.0
+        self._waveform_token: int | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
         self.engine.connect("error", self._on_error)
 
         self.add_css_class("toolbar")
+        self.add_css_class("purrr-playback-card")
         self.set_margin_top(6)
         self.set_margin_bottom(6)
         self.set_margin_start(12)
@@ -64,6 +67,7 @@ class PlaybackBar(Gtk.Box):
 
         self._art_button = Gtk.Button(has_frame=False, valign=Gtk.Align.CENTER, tooltip_text="Ver carátula")
         self._art_button.add_css_class("flat")
+        self._art_button.add_css_class("purrr-art-rounded")
         self._art_button.set_child(self._art_picture)
         self._art_button.connect("clicked", self._on_art_clicked)
         self._art_button.set_visible(False)
@@ -84,19 +88,12 @@ class PlaybackBar(Gtk.Box):
         self._position_label = Gtk.Label(label="0:00")
         self._duration_label = Gtk.Label(label="0:00")
 
-        self._scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, hexpand=True)
-        self._scale.set_range(0, 1)
-        self._scale.set_draw_value(False)
-        self._scale.connect("change-value", self._on_scale_change_value)
-
-        press_gesture = Gtk.GestureClick()
-        press_gesture.connect("pressed", lambda *_: setattr(self, "_dragging", True))
-        press_gesture.connect("released", lambda *_: setattr(self, "_dragging", False))
-        self._scale.add_controller(press_gesture)
+        self._waveform_scrubber = WaveformScrubber()
+        self._waveform_scrubber.connect("seek-requested", self._on_scrubber_seek)
 
         seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         seek_row.append(self._position_label)
-        seek_row.append(self._scale)
+        seek_row.append(self._waveform_scrubber)
         seek_row.append(self._duration_label)
 
         # --- Fila de controles ------------------------------------------
@@ -104,6 +101,8 @@ class PlaybackBar(Gtk.Box):
         self._prev_button.connect("clicked", self._on_previous_clicked)
 
         self._play_pause_button = Gtk.Button(icon_name="media-playback-start-symbolic")
+        self._play_pause_button.add_css_class("circular")
+        self._play_pause_button.add_css_class("purrr-accent-button")
         self._play_pause_button.connect("clicked", self._on_play_pause_clicked)
 
         self._next_button = Gtk.Button(icon_name="media-skip-forward-symbolic")
@@ -164,7 +163,7 @@ class PlaybackBar(Gtk.Box):
         self.engine.play()
         self._title_label.set_text(item.title)
         self._artist_label.set_text(item.artist or "Artista desconocido")
-        self._scale.set_range(0, max(item.duration_seconds, 1))
+        self._current_duration = max(item.duration_seconds, 1)
         self._duration_label.set_text(_format_time(item.duration_seconds))
         self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
         self._set_controls_sensitive(True)
@@ -174,7 +173,22 @@ class PlaybackBar(Gtk.Box):
             # embebida — la rescatamos ahora, sin red, antes de mostrarlo.
             item.art_path = self._sync_controller.resolve_local_art(item.track_id, item.local_path)
         self._update_art(item.art_path)
+        self._load_waveform(item)
         self.emit("now-playing-changed", item)
+
+    def _load_waveform(self, item: QueueItem) -> None:
+        self._waveform_token = item.track_id
+        self._waveform_scrubber.set_waveform([])
+        self._waveform_scrubber.set_progress(0.0)
+        self._sync_controller.ensure_waveform(
+            item.drive_file_id, item.local_path,
+            on_complete=lambda bars, track_id=item.track_id: self._on_waveform_ready(track_id, bars),
+        )
+
+    def _on_waveform_ready(self, track_id: int, bars: list[float]) -> None:
+        if track_id != self._waveform_token:
+            return  # el usuario ya cambió de canción mientras se calculaba esta
+        self._waveform_scrubber.set_waveform(bars)
 
     def _update_art(self, art_path: str | None) -> None:
         self._current_art_path = art_path
@@ -207,6 +221,9 @@ class PlaybackBar(Gtk.Box):
         self._title_label.set_text(f"Descargando: {item.title}…")
         self._artist_label.set_text(item.artist or "")
         self._update_art(item.art_path)
+        self._waveform_token = None
+        self._waveform_scrubber.set_waveform([])
+        self._waveform_scrubber.set_progress(0.0)
         self._set_controls_sensitive(False)
 
     def _on_download_complete(self, item: QueueItem, local_path: str, art_path: str | None) -> None:
@@ -253,7 +270,9 @@ class PlaybackBar(Gtk.Box):
         return self.engine.get_position() or 0.0
 
     def _set_controls_sensitive(self, sensitive: bool) -> None:
-        for widget in (self._prev_button, self._play_pause_button, self._next_button, self._scale):
+        for widget in (
+            self._prev_button, self._play_pause_button, self._next_button, self._waveform_scrubber,
+        ):
             widget.set_sensitive(sensitive)
 
     def _on_play_pause_clicked(self, _button) -> None:
@@ -285,15 +304,14 @@ class PlaybackBar(Gtk.Box):
     def _on_volume_changed(self, _button, value: float) -> None:
         self.engine.set_volume(value)
 
-    def _on_scale_change_value(self, _range, _scroll_type, value: float) -> bool:
-        self.engine.seek(value)
-        return False
+    def _on_scrubber_seek(self, _widget, fraction: float) -> None:
+        if self.queue.is_empty():
+            return
+        self.engine.seek(fraction * self._current_duration)
 
     def _on_position_updated(self, _engine, position: float, duration: float) -> None:
-        if self._dragging:
-            return
-        self._scale.set_range(0, max(duration, 1))
-        self._scale.set_value(position)
+        self._current_duration = max(duration, 1)
+        self._waveform_scrubber.set_progress(position / self._current_duration)
         self._position_label.set_text(_format_time(position))
         self._duration_label.set_text(_format_time(duration))
 
@@ -303,7 +321,7 @@ class PlaybackBar(Gtk.Box):
             self.play_queue_item(item)
         else:
             self._play_pause_button.set_icon_name("media-playback-start-symbolic")
-            self._scale.set_value(0)
+            self._waveform_scrubber.set_progress(0.0)
 
     def _on_error(self, _engine, message: str) -> None:
         self.emit("playback-error", message)

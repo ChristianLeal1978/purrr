@@ -7,6 +7,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib, GObject
 
+from purrr.audio import waveform as waveform_extractor
 from purrr.auth.oauth import get_credentials
 from purrr.cache.manager import (
     art_cache_path,
@@ -151,6 +152,30 @@ class SyncController(GObject.Object):
         if track_row["art_path"]:
             return track_row["art_path"]
         return self._resolve_embedded_art(track_row, Path(local_path))
+
+    def ensure_waveform(
+        self, drive_file_id: str, local_path: str, on_complete: Callable[[list[float]], None]
+    ) -> None:
+        """Entrega la forma de onda de este track: al toque si ya está cacheada, o calculándola
+        en un hilo aparte (decodifica el audio entero, así que no puede ir en la UI)."""
+        cached = waveform_extractor.load_cached(drive_file_id)
+        if cached is not None:
+            on_complete(cached)
+            return
+        threading.Thread(
+            target=self._extract_waveform_thread,
+            args=(drive_file_id, local_path, on_complete),
+            daemon=True,
+        ).start()
+
+    def _extract_waveform_thread(
+        self, drive_file_id: str, local_path: str, on_complete: Callable[[list[float]], None]
+    ) -> None:
+        try:
+            bars = waveform_extractor.extract_and_cache(Path(local_path), key=drive_file_id)
+        except Exception:  # noqa: BLE001 — si falla el análisis, mejor una barra plana que romper la UI
+            bars = []
+        GLib.idle_add(on_complete, bars)
 
     def _resolve_embedded_art(self, track_row, local_audio_path: Path) -> str | None:
         """Solo arte embebido en el archivo de audio local — no requiere red."""

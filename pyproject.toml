@@ -22,4 +22,4 @@ purrr = "purrr.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-purrr = ["db/schema.sql"]
+purrr = ["db/schema.sql", "ui/style.css"]

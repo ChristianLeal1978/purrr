@@ -1,0 +1,23 @@
+.purrr-playback-card {
+    background-color: alpha(@window_bg_color, 0.6);
+    border-radius: 18px;
+    margin: 8px;
+    padding: 6px 10px;
+}
+
+.purrr-accent-button {
+    background-color: #f2c14e;
+    color: #1a1408;
+}
+.purrr-accent-button:hover {
+    background-color: #f6cf72;
+}
+.purrr-accent-button:active,
+.purrr-accent-button:checked {
+    background-color: #d9a92e;
+}
+
+.purrr-art-rounded {
+    border-radius: 10px;
+    overflow: hidden;
+}
