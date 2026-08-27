@@ -22,7 +22,7 @@ class WaveformScrubber(Gtk.DrawingArea):
 
     def __init__(self):
         super().__init__(hexpand=True)
-        self.set_size_request(-1, 24)
+        self.set_size_request(-1, 52)
         self._waveform: list[float] = []
         self._progress = 0.0
         self._drag_active = False

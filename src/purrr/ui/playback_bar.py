@@ -3,7 +3,8 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GObject, Gtk
+gi.require_version("Pango", "1.0")
+from gi.repository import GObject, Gtk, Pango
 
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
@@ -66,14 +67,19 @@ class PlaybackBar(Gtk.Box):
         self._art_button.set_sensitive(False)
         self.append(self._art_button)
 
-        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True, valign=Gtk.Align.CENTER)
+        # Una sola fila horizontal (texto | onda | controles | volumen) en vez de dos apiladas —
+        # la barra queda más baja y la onda puede ser más alta dentro de esa única fila.
+        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, hexpand=True, valign=Gtk.Align.CENTER)
 
         self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.START, xalign=0)
         self._title_label.add_css_class("heading")
+        self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._artist_label = Gtk.Label(label="", halign=Gtk.Align.START, xalign=0)
         self._artist_label.add_css_class("dim-label")
+        self._artist_label.set_ellipsize(Pango.EllipsizeMode.END)
 
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=False)
+        text_box.set_size_request(150, -1)
         text_box.append(self._title_label)
         text_box.append(self._artist_label)
 
@@ -83,12 +89,12 @@ class PlaybackBar(Gtk.Box):
         self._waveform_scrubber = WaveformScrubber()
         self._waveform_scrubber.connect("seek-requested", self._on_scrubber_seek)
 
-        seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        seek_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, hexpand=True)
         seek_row.append(self._position_label)
         seek_row.append(self._waveform_scrubber)
         seek_row.append(self._duration_label)
 
-        # --- Fila de controles ------------------------------------------
+        # --- Controles ------------------------------------------
         self._prev_button = Gtk.Button(icon_name="media-skip-backward-symbolic")
         self._prev_button.connect("clicked", self._on_previous_clicked)
 
@@ -125,13 +131,10 @@ class PlaybackBar(Gtk.Box):
         controls_row.append(self._next_button)
         controls_row.append(self._repeat_button)
 
-        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        top_row.append(text_box)
-        top_row.append(controls_row)
-        top_row.append(self._volume_button)
-
-        right_box.append(top_row)
+        right_box.append(text_box)
         right_box.append(seek_row)
+        right_box.append(controls_row)
+        right_box.append(self._volume_button)
         self.append(right_box)
 
         self._set_controls_sensitive(False)
