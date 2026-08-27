@@ -55,6 +55,7 @@ def text_column(
     factory.connect("bind", on_bind)
     column = Gtk.ColumnViewColumn(title=title, factory=factory)
     column.set_expand(expand)
+    column.set_resizable(True)
 
     if sortable:
         key = sort_attr or attr

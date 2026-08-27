@@ -81,13 +81,15 @@ class FolderBrowserView(Gtk.Box):
         tree_factory.connect("bind", self._on_tree_bind)
 
         tree_view = Gtk.ListView(model=self._tree_selection, factory=tree_factory)
-        tree_scrolled = Gtk.ScrolledWindow(vexpand=True, hexpand=False, width_request=260)
+        tree_scrolled = Gtk.ScrolledWindow(vexpand=True, hexpand=False)
         tree_scrolled.set_child(tree_view)
+        tree_scrolled.set_size_request(160, -1)
 
         right_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True,
             margin_start=12, margin_top=6, margin_end=6,
         )
+        right_box.set_size_request(300, -1)
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._breadcrumb = Gtk.Label(
             label="Elige una carpeta a la izquierda", halign=Gtk.Align.START, xalign=0, hexpand=True
@@ -130,9 +132,15 @@ class FolderBrowserView(Gtk.Box):
         track_scrolled.set_child(self._track_view)
         right_box.append(track_scrolled)
 
-        self.append(tree_scrolled)
-        self.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        self.append(right_box)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True, wide_handle=True)
+        paned.set_start_child(tree_scrolled)
+        paned.set_resize_start_child(False)
+        paned.set_shrink_start_child(False)
+        paned.set_end_child(right_box)
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
+        paned.set_position(260)
+        self.append(paned)
 
     def refresh(self, sources: list[sqlite3.Row]) -> None:
         self._root_store.splice(0, self._root_store.get_n_items(), [build_source_node(s) for s in sources])
