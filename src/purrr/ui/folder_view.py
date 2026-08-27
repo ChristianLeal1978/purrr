@@ -6,7 +6,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GObject, Gtk
 
 from purrr.db import database
-from purrr.ui.library_view import TrackObject, text_column
+from purrr.ui.library_view import TrackObject, apply_now_playing, text_column
 
 
 class FolderNode(GObject.Object):
@@ -157,6 +157,9 @@ class FolderBrowserView(Gtk.Box):
         """Tracks tal como se ven ahora (respetando el orden de columna que haya elegido el
         usuario), no el orden crudo con que llegaron de la base."""
         return [self._track_selection.get_item(i) for i in range(self._track_selection.get_n_items())]
+
+    def set_now_playing(self, track_id: int | None) -> None:
+        apply_now_playing(self._track_store, track_id)
 
     def refresh_current_folder(self) -> None:
         """Vuelve a leer de la base la carpeta que está mostrando (p. ej. tras un escaneo de

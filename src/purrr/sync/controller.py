@@ -125,6 +125,9 @@ class SyncController(GObject.Object):
             GLib.idle_add(self.emit, "error", f"No se pudo autenticar con Google: {exc}")
             return
 
+        if folder_path is not None:
+            self._refresh_folder_cover(service, source_id, folder_path)
+
         tracks = database.list_tracks_needing_metadata(source_id, folder_path)
         total = len(tracks)
         updated = 0
@@ -206,6 +209,25 @@ class SyncController(GObject.Object):
             if looks_like_cover(entry["name"]):
                 return entry["id"], Path(entry["name"]).suffix or ".jpg"
         return None
+
+    def _refresh_folder_cover(self, service, source_id: int, folder_path: str) -> None:
+        """Busca de nuevo (forzado, aunque ya se hubiera buscado antes) un cover.*/folder.* en
+        esta carpeta de Drive y lo aplica a sus canciones. Se llama al apretar 'Leer etiquetas'
+        sobre una carpeta puntual — si esas canciones ya tenían título, el resto del escaneo no
+        las toca, así que sin esto una carátula agregada después nunca se encontraba."""
+        tracks = database.list_tracks_in_folder(source_id, folder_path)
+        if not tracks:
+            return
+        parent_id = tracks[0]["drive_parent_id"]
+        cover = self._find_folder_cover_file(service, parent_id)
+        if cover is None:
+            return
+        cover_id, cover_ext = cover
+        database.force_set_folder_cover(source_id, parent_id, cover_id, cover_ext)
+        for track_row in tracks:
+            refreshed = database.get_track(track_row["id"])
+            if self._ensure_folder_cover_art(service, refreshed):
+                GLib.idle_add(self.emit, "track-updated", track_row["id"])
 
     def ensure_waveform(
         self, drive_file_id: str, local_path: str, on_complete: Callable[[list[float]], None]

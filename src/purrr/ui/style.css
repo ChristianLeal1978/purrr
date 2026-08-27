@@ -20,3 +20,8 @@
 .purrr-art-rounded {
     border-radius: 10px;
 }
+
+.purrr-now-playing {
+    color: #f2c14e;
+    font-weight: bold;
+}

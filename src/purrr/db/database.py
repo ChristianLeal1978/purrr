@@ -257,6 +257,20 @@ def set_folder_covers(source_id: int, folder_covers: dict[str, tuple[str, str]])
     conn.commit()
 
 
+def force_set_folder_cover(source_id: int, parent_id: str, cover_id: str, cover_ext: str) -> None:
+    """Como set_folder_covers, pero sin el resguardo de 'solo si estaba en NULL' — para cuando
+    el usuario pide explícitamente re-buscar la carátula de una carpeta (botón 'Leer etiquetas'),
+    donde si corresponde SÍ hay que pisar un folder_cover_file_id viejo o el sentinel '' de
+    'ya se buscó antes y no había nada'."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE tracks SET folder_cover_file_id = ?, folder_cover_ext = ? "
+        "WHERE source_id = ? AND drive_parent_id = ?",
+        (cover_id, cover_ext, source_id, parent_id),
+    )
+    conn.commit()
+
+
 def mark_missing_tracks(source_id: int, seen_drive_file_ids: set[str]) -> None:
     conn = get_connection()
     placeholders = ",".join("?" * len(seen_drive_file_ids)) if seen_drive_file_ids else "''"

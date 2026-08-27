@@ -17,6 +17,8 @@ def _format_duration(seconds: float | None) -> str:
 class TrackObject(GObject.Object):
     """Envoltorio GObject de una fila de `tracks` para usar en un Gio.ListStore."""
 
+    playing = GObject.Property(type=bool, default=False)
+
     def __init__(self, row: sqlite3.Row):
         super().__init__()
         self.track_id: int = row["id"]
@@ -37,6 +39,21 @@ class TrackObject(GObject.Object):
         )
 
 
+def apply_now_playing(store: Gio.ListStore, track_id: int | None) -> None:
+    """Marca (con notificación GObject, para que las filas ya dibujadas se repinten solas) cuál
+    TrackObject de este store es el que está sonando ahora."""
+    for i in range(store.get_n_items()):
+        track: TrackObject = store.get_item(i)
+        track.playing = track.track_id == track_id
+
+
+def _sync_playing_style(label: Gtk.Label, track: TrackObject) -> None:
+    if track.playing:
+        label.add_css_class("purrr-now-playing")
+    else:
+        label.remove_css_class("purrr-now-playing")
+
+
 def text_column(
     title: str, attr: str, expand: bool = False, sortable: bool = False, sort_attr: str | None = None
 ) -> Gtk.ColumnViewColumn:
@@ -50,9 +67,22 @@ def text_column(
         label = list_item.get_child()
         track: TrackObject = list_item.get_item()
         label.set_text(getattr(track, attr))
+        _sync_playing_style(label, track)
+        # El item se recicla entre filas al hacer scroll — sin desconectar en on_unbind, cada
+        # rebind agregaría OTRA conexión, y una fila terminaría reaccionando a canciones ajenas.
+        handler_id = track.connect("notify::playing", lambda t, _p, lbl=label: _sync_playing_style(lbl, t))
+        list_item.purrr_playing_binding = (track, handler_id)
+
+    def on_unbind(_factory, list_item: Gtk.ListItem) -> None:
+        binding = getattr(list_item, "purrr_playing_binding", None)
+        if binding is not None:
+            track, handler_id = binding
+            track.disconnect(handler_id)
+            list_item.purrr_playing_binding = None
 
     factory.connect("setup", on_setup)
     factory.connect("bind", on_bind)
+    factory.connect("unbind", on_unbind)
     column = Gtk.ColumnViewColumn(title=title, factory=factory)
     column.set_expand(expand)
     column.set_resizable(True)
@@ -118,6 +148,9 @@ class LibraryView(Gtk.Box):
     def get_visible_tracks(self) -> list[TrackObject]:
         """Tracks tal como se ven actualmente (respetando el orden/columna elegidos por el usuario)."""
         return [self._selection.get_item(i) for i in range(self._selection.get_n_items())]
+
+    def set_now_playing(self, track_id: int | None) -> None:
+        apply_now_playing(self._store, track_id)
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
         if self._search_changed_source_id is not None:

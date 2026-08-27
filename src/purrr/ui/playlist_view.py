@@ -5,7 +5,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GObject, Gtk
 
-from purrr.ui.library_view import TrackObject, text_column
+from purrr.ui.library_view import TrackObject, apply_now_playing, text_column
 
 
 class PlaylistView(Gtk.Box):
@@ -65,6 +65,9 @@ class PlaylistView(Gtk.Box):
 
     def get_visible_tracks(self) -> list[TrackObject]:
         return self._tracks
+
+    def set_now_playing(self, track_id: int | None) -> None:
+        apply_now_playing(self._store, track_id)
 
     def _on_row_activated(self, _view, position: int) -> None:
         track: TrackObject = self._store.get_item(position)

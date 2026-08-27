@@ -130,6 +130,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sync_controller.connect("metadata-scan-finished", self._on_metadata_scan_finished)
 
         self._playback_bar.connect("playback-error", self._on_playback_error)
+        self._playback_bar.connect("now-playing-changed", self._on_now_playing_changed)
 
     def _reload_all(self) -> None:
         self._library_view.refresh(database.list_tracks())
@@ -248,6 +249,11 @@ class PurrrWindow(Adw.ApplicationWindow):
         ]
         self._queue.set_queue(items, index)
         self._playback_bar.play_queue_item(self._queue.current())
+
+    def _on_now_playing_changed(self, _bar, item: QueueItem) -> None:
+        self._library_view.set_now_playing(item.track_id)
+        self._folder_view.set_now_playing(item.track_id)
+        self._playlist_view.set_now_playing(item.track_id)
 
     # --- Playlists -------------------------------------------------------
 
