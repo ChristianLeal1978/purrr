@@ -68,6 +68,7 @@ class FolderBrowserView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0, vexpand=True)
         self._tracks: list[TrackObject] = []
         self._current_node: FolderNode | None = None
+        self._now_playing_track_id: int | None = None
 
         self._root_store = Gio.ListStore(item_type=FolderNode)
         self._tree_model = Gtk.TreeListModel.new(
@@ -159,6 +160,7 @@ class FolderBrowserView(Gtk.Box):
         return [self._track_selection.get_item(i) for i in range(self._track_selection.get_n_items())]
 
     def set_now_playing(self, track_id: int | None) -> None:
+        self._now_playing_track_id = track_id
         apply_now_playing(self._track_store, track_id)
 
     def refresh_current_folder(self) -> None:
@@ -221,6 +223,7 @@ class FolderBrowserView(Gtk.Box):
         track_rows = database.list_tracks_in_folder(node.source_id, node.path)
         self._tracks = [TrackObject(row) for row in track_rows]
         self._track_store.splice(0, self._track_store.get_n_items(), self._tracks)
+        apply_now_playing(self._track_store, self._now_playing_track_id)
         cancion_palabra = "canción" if len(self._tracks) == 1 else "canciones"
         self._breadcrumb.set_label(f"{node.display_path}  ·  {len(self._tracks)} {cancion_palabra}")
         database.set_state("last_folder_source_id", str(node.source_id))

@@ -20,6 +20,7 @@ class PlaylistView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._playlist_id: int | None = None
         self._tracks: list[TrackObject] = []
+        self._now_playing_track_id: int | None = None
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self._title_label = Gtk.Label(halign=Gtk.Align.START, hexpand=True)
@@ -62,11 +63,13 @@ class PlaylistView(Gtk.Box):
         # splice() en una sola operación en vez de append() en loop — ver el comentario en
         # LibraryView.refresh() sobre por qué el loop puede colgar la ventana.
         self._store.splice(0, self._store.get_n_items(), self._tracks)
+        apply_now_playing(self._store, self._now_playing_track_id)
 
     def get_visible_tracks(self) -> list[TrackObject]:
         return self._tracks
 
     def set_now_playing(self, track_id: int | None) -> None:
+        self._now_playing_track_id = track_id
         apply_now_playing(self._store, track_id)
 
     def _on_row_activated(self, _view, position: int) -> None:

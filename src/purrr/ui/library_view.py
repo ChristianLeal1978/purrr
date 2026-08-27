@@ -109,6 +109,7 @@ class LibraryView(Gtk.Box):
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._now_playing_track_id: int | None = None
 
         self._search_entry = Gtk.SearchEntry(placeholder_text="Buscar por título, artista o álbum")
         self._search_entry.connect("search-changed", self._on_search_changed)
@@ -144,12 +145,14 @@ class LibraryView(Gtk.Box):
         # que la ventana pareciera colgada durante un escaneo de metadatos.
         items = [TrackObject(row) for row in track_rows]
         self._store.splice(0, self._store.get_n_items(), items)
+        apply_now_playing(self._store, self._now_playing_track_id)
 
     def get_visible_tracks(self) -> list[TrackObject]:
         """Tracks tal como se ven actualmente (respetando el orden/columna elegidos por el usuario)."""
         return [self._selection.get_item(i) for i in range(self._selection.get_n_items())]
 
     def set_now_playing(self, track_id: int | None) -> None:
+        self._now_playing_track_id = track_id
         apply_now_playing(self._store, track_id)
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
