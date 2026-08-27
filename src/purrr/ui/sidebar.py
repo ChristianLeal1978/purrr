@@ -6,6 +6,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GObject, Gtk
 
 _LIBRARY_ROW = "library"
+_FOLDERS_ROW = "folders"
 _SOURCES_ROW = "sources"
 _NEW_PLAYLIST_ROW = "new-playlist"
 
@@ -13,6 +14,7 @@ _NEW_PLAYLIST_ROW = "new-playlist"
 class Sidebar(Gtk.Box):
     __gsignals__ = {
         "library-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "folders-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sources-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "playlist-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "new-playlist-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -27,6 +29,9 @@ class Sidebar(Gtk.Box):
 
         self._library_row = self._make_row("Biblioteca", "audio-x-generic-symbolic")
         self._list_box.append(self._library_row)
+
+        self._folders_row = self._make_row("Carpetas", "folder-symbolic")
+        self._list_box.append(self._folders_row)
 
         self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
         self._list_box.append(self._sources_row)
@@ -76,6 +81,8 @@ class Sidebar(Gtk.Box):
     def _on_row_activated(self, _list_box, row: Gtk.ListBoxRow) -> None:
         if row is self._library_row:
             self.emit("library-selected")
+        elif row is self._folders_row:
+            self.emit("folders-selected")
         elif row is self._sources_row:
             self.emit("sources-selected")
         elif row is self._new_playlist_row:

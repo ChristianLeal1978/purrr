@@ -29,6 +29,12 @@ class TrackObject(GObject.Object):
         self.local_path: str | None = row["local_path"]
         self.cache_status: str = row["cache_status"]
         self.art_path: str | None = row["art_path"]
+        self.track_label: str = str(row["track_number"]) if row["track_number"] is not None else ""
+        # Sentinel grande para que las pistas sin número de pista queden al final al ordenar,
+        # en vez de mezclarse con la pista "0"/"1" real por culpa del None.
+        self.track_number_sort: int = (
+            row["track_number"] if row["track_number"] is not None else 1_000_000
+        )
 
 
 def text_column(

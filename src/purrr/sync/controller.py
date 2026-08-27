@@ -107,16 +107,16 @@ class SyncController(GObject.Object):
 
     # --- Lectura de metadatos por fragmentos (sin descargar el audio completo) --
 
-    def start_metadata_scan(self, source_id: int) -> None:
+    def start_metadata_scan(self, source_id: int, folder_path: str | None = None) -> None:
         if self._busy():
             return
         self._cancelled = False
         self._metadata_thread = threading.Thread(
-            target=self._run_metadata_scan, args=(source_id,), daemon=True
+            target=self._run_metadata_scan, args=(source_id, folder_path), daemon=True
         )
         self._metadata_thread.start()
 
-    def _run_metadata_scan(self, source_id: int) -> None:
+    def _run_metadata_scan(self, source_id: int, folder_path: str | None = None) -> None:
         try:
             creds = get_credentials()
             service = get_service(creds)
@@ -124,7 +124,7 @@ class SyncController(GObject.Object):
             GLib.idle_add(self.emit, "error", f"No se pudo autenticar con Google: {exc}")
             return
 
-        tracks = database.list_tracks_needing_metadata(source_id)
+        tracks = database.list_tracks_needing_metadata(source_id, folder_path)
         total = len(tracks)
         updated = 0
         for i, track_row in enumerate(tracks, start=1):

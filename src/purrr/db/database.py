@@ -136,9 +136,19 @@ def list_pending_tracks(source_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def list_tracks_needing_metadata(source_id: int) -> list[sqlite3.Row]:
-    """Tracks sin descargar todavía y sin etiquetas leídas — candidatos para lectura parcial."""
-    return get_connection().execute(
+def list_tracks_needing_metadata(source_id: int, folder_path: str | None = None) -> list[sqlite3.Row]:
+    """Tracks sin descargar todavía y sin etiquetas leídas — candidatos para lectura parcial.
+
+    Con `folder_path`, se limita a esa carpeta puntual (no recursivo) en vez de toda la fuente.
+    """
+    conn = get_connection()
+    if folder_path is not None:
+        return conn.execute(
+            "SELECT * FROM tracks WHERE source_id = ? AND drive_folder_path = ? "
+            "AND cache_status = 'pending' AND title IS NULL ORDER BY file_name",
+            (source_id, folder_path),
+        ).fetchall()
+    return conn.execute(
         "SELECT * FROM tracks WHERE source_id = ? AND cache_status = 'pending' AND title IS NULL "
         "ORDER BY file_name",
         (source_id,),
@@ -276,6 +286,30 @@ def list_tracks(filter_text: str | None = None) -> list[sqlite3.Row]:
 
 def get_track(track_id: int) -> sqlite3.Row | None:
     return get_connection().execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
+
+
+def list_source_folder_paths(source_id: int) -> list[str]:
+    """Rutas de carpeta distintas (relativas a la raíz de la fuente) que tienen canciones."""
+    rows = get_connection().execute(
+        "SELECT DISTINCT drive_folder_path FROM tracks "
+        "WHERE source_id = ? AND drive_folder_path IS NOT NULL AND cache_status != 'missing'",
+        (source_id,),
+    ).fetchall()
+    return [row["drive_folder_path"] for row in rows]
+
+
+def list_tracks_in_folder(source_id: int, folder_path: str) -> list[sqlite3.Row]:
+    """Canciones directamente dentro de esa carpeta (no recursivo), en orden de álbum.
+
+    `file_name` como último criterio (en vez de `title`) porque suele traer el número de pista
+    en el nombre — así el orden por defecto no queda arbitrario en canciones que aún no
+    tienen etiquetas leídas (title/track_number en NULL).
+    """
+    return get_connection().execute(
+        "SELECT * FROM tracks WHERE source_id = ? AND drive_folder_path = ? AND cache_status != 'missing' "
+        "ORDER BY disc_number, track_number, file_name",
+        (source_id, folder_path),
+    ).fetchall()
 
 
 # --- Playlists -------------------------------------------------------------

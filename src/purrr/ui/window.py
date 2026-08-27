@@ -15,6 +15,7 @@ from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
 from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
+from purrr.ui.folder_view import FolderBrowserView
 from purrr.ui.library_view import LibraryView
 from purrr.ui.playback_bar import PlaybackBar
 from purrr.ui.playlist_view import PlaylistView
@@ -54,6 +55,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._sidebar = Sidebar()
         self._library_view = LibraryView()
+        self._folder_view = FolderBrowserView()
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
         self._playback_bar = PlaybackBar(self._engine, self._queue, self._sync_controller)
@@ -68,6 +70,7 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _build_layout(self) -> None:
         self._content_stack = Gtk.Stack()
         self._content_stack.add_named(self._library_view, "library")
+        self._content_stack.add_named(self._folder_view, "folders")
         self._content_stack.add_named(self._playlist_view, "playlist")
         self._content_stack.add_named(self._sources_view, "sources")
 
@@ -90,12 +93,16 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _connect_signals(self) -> None:
         self._sidebar.connect("library-selected", self._on_library_selected)
+        self._sidebar.connect("folders-selected", self._on_folders_selected)
         self._sidebar.connect("sources-selected", self._on_sources_selected)
         self._sidebar.connect("playlist-selected", self._on_playlist_selected)
         self._sidebar.connect("new-playlist-requested", self._on_new_playlist_requested)
 
         self._library_view.connect("track-activated", self._on_library_track_activated)
         self._library_view.connect("search-changed", self._on_library_search_changed)
+
+        self._folder_view.connect("track-activated", self._on_folder_track_activated)
+        self._folder_view.connect("scan-folder-requested", self._on_folder_scan_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -118,6 +125,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _reload_all(self) -> None:
         self._library_view.refresh(database.list_tracks())
+        self._folder_view.refresh(database.list_sources())
         self._sidebar.refresh_playlists(database.list_playlists())
         self._sources_view.refresh_sources(database.list_sources())
 
@@ -129,6 +137,10 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_library_selected(self, _sidebar) -> None:
         self._content_page.set_title("Biblioteca")
         self._content_stack.set_visible_child_name("library")
+
+    def _on_folders_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Carpetas")
+        self._content_stack.set_visible_child_name("folders")
 
     def _on_sources_selected(self, _sidebar) -> None:
         self._content_page.set_title("Fuentes de Google Drive")
@@ -166,6 +178,13 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_playlist_track_activated(self, _view, track_id: int) -> None:
         tracks = self._playlist_view.get_visible_tracks()
         self._play_from_track_list(tracks, track_id)
+
+    def _on_folder_track_activated(self, _view, track_id: int) -> None:
+        tracks = self._folder_view.get_visible_tracks()
+        self._play_from_track_list(tracks, track_id)
+
+    def _on_folder_scan_requested(self, _view, source_id: int, folder_path: str) -> None:
+        self._sync_controller.start_metadata_scan(source_id, folder_path)
 
     def _play_from_track_list(self, tracks, track_id: int) -> None:
         index = next((i for i, t in enumerate(tracks) if t.track_id == track_id), None)
@@ -246,16 +265,22 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _on_metadata_scan_finished(self, _controller, updated: int, total: int) -> None:
         self._sources_view.hide_progress()
-        self._reload_all()
+        self._folder_view.hide_scan_progress()
+        # No usa _reload_all(): una lectura de etiquetas no cambia la estructura de carpetas,
+        # así que alcanza con refrescar contenido — evita perder la carpeta que el usuario
+        # tenía abierta en la vista de Carpetas.
+        self._refresh_after_track_updates()
         self._toast(f"Etiquetas leídas: {updated} de {total} canciones actualizadas.")
 
     def _on_delete_source_requested(self, _view, source_id: int) -> None:
         database.delete_source(source_id)
         self._sources_view.refresh_sources(database.list_sources())
         self._library_view.refresh(database.list_tracks())
+        self._folder_view.refresh(database.list_sources())
 
     def _on_sync_progress(self, _controller, stage: str, actual: int, total: int) -> None:
         self._sources_view.show_progress(stage, actual, total)
+        self._folder_view.show_scan_progress(stage)
 
     def _on_sync_finished(self, _controller, total: int) -> None:
         self._sources_view.hide_progress()
@@ -278,6 +303,7 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _refresh_after_track_updates(self) -> bool:
         self._track_updated_source_id = None
         self._library_view.refresh(database.list_tracks(filter_text=self._current_search_text))
+        self._folder_view.refresh_current_folder()
         if self._current_playlist_id is not None:
             self._on_playlist_selected(self._sidebar, self._current_playlist_id)
         return False
