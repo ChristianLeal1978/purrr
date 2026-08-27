@@ -73,7 +73,10 @@ class FolderBrowserView(Gtk.Box):
         self._tree_model = Gtk.TreeListModel.new(
             self._root_store, passthrough=False, autoexpand=False, create_func=self._create_child_model
         )
-        self._tree_selection = Gtk.SingleSelection(model=self._tree_model)
+        # autoselect=False: sin esto, Gtk.SingleSelection selecciona solo el primer nodo apenas
+        # se llena el árbol (en cada refresh()), pisando la restauración de "última carpeta
+        # abierta" con la raíz de la primera fuente.
+        self._tree_selection = Gtk.SingleSelection(model=self._tree_model, autoselect=False)
         self._tree_selection.connect("notify::selected-item", self._on_folder_selected)
 
         tree_factory = Gtk.SignalListItemFactory()
@@ -162,6 +165,25 @@ class FolderBrowserView(Gtk.Box):
         if row is not None:
             self._show_folder(row.get_item())
 
+    def select_folder(self, source_id: int, path: str) -> None:
+        """Expande el árbol hasta esa carpeta y la selecciona (para restaurar la última vista)."""
+        if not path or path == "/":
+            return
+        i = 0
+        while i < self._tree_model.get_n_items():
+            row = self._tree_model.get_item(i)
+            node: FolderNode = row.get_item()
+            if node.source_id == source_id and node.path == path:
+                self._tree_selection.select_item(i, True)
+                return
+            is_ancestor = node.source_id == source_id and (
+                node.path == "/" or path.startswith(node.path.rstrip("/") + "/")
+            )
+            if is_ancestor and not row.get_expanded():
+                row.set_expanded(True)
+                continue  # no avanzar: en la próxima vuelta ya están sus hijos insertados acá
+            i += 1
+
     def _create_child_model(self, item: FolderNode, _user_data=None) -> Gio.ListModel | None:
         if not item.children:
             return None
@@ -198,6 +220,8 @@ class FolderBrowserView(Gtk.Box):
         self._track_store.splice(0, self._track_store.get_n_items(), self._tracks)
         cancion_palabra = "canción" if len(self._tracks) == 1 else "canciones"
         self._breadcrumb.set_label(f"{node.display_path}  ·  {len(self._tracks)} {cancion_palabra}")
+        database.set_state("last_folder_source_id", str(node.source_id))
+        database.set_state("last_folder_path", node.path)
 
     def _on_track_activated(self, _view, position: int) -> None:
         track: TrackObject = self._track_selection.get_item(position)

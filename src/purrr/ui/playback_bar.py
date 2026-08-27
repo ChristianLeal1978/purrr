@@ -3,32 +3,21 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, GObject, Gtk
+from gi.repository import GObject, Gtk
 
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
+from purrr.ui.textures import load_texture_at_size
 from purrr.ui.waveform_scrubber import WaveformScrubber
 
-_ART_THUMB_SIZE = 52  # ~alto combinado de título + artista
+_ART_THUMB_SIZE = 72  # ~alto combinado de la columna de texto + controles + onda, a la derecha
 _ART_EXPANDED_SIZE = 360
 
 
 def _format_time(seconds: float) -> str:
     total = int(seconds)
     return f"{total // 60}:{total % 60:02d}"
-
-
-def _load_texture_at_size(path: str, size: int) -> Gdk.Texture | None:
-    """Escala la imagen ANTES de dársela a Gtk.Picture — si le pasamos el archivo completo
-    (a veces 500px+ de carátula embebida), Picture usa esas dimensiones como tamaño natural
-    sin importar `set_size_request`, y termina empujando el layout de toda la barra."""
-    try:
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
-        return Gdk.Texture.new_for_pixbuf(pixbuf)
-    except Exception:
-        return None
 
 
 class PlaybackBar(Gtk.Box):
@@ -38,13 +27,14 @@ class PlaybackBar(Gtk.Box):
     }
 
     def __init__(self, engine: PlayerEngine, queue: PlayQueue, sync_controller: SyncController):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.engine = engine
         self.queue = queue
         self._sync_controller = sync_controller
         self._pending_track_id: int | None = None
         self._current_duration = 1.0
         self._waveform_token: int | None = None
+        self._art_token: int | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
@@ -57,7 +47,7 @@ class PlaybackBar(Gtk.Box):
         self.set_margin_start(12)
         self.set_margin_end(12)
 
-        # --- Fila de metadatos + barra de progreso -------------------------
+        # --- Carátula: a la izquierda, ocupa toda la altura de la barra --------
         self._current_art_path: str | None = None
 
         self._art_picture = Gtk.Picture(
@@ -68,22 +58,24 @@ class PlaybackBar(Gtk.Box):
         self._art_button = Gtk.Button(has_frame=False, valign=Gtk.Align.CENTER, tooltip_text="Ver carátula")
         self._art_button.add_css_class("flat")
         self._art_button.add_css_class("purrr-art-rounded")
+        self._art_button.set_overflow(Gtk.Overflow.HIDDEN)
         self._art_button.set_child(self._art_picture)
         self._art_button.connect("clicked", self._on_art_clicked)
-        self._art_button.set_visible(False)
+        # Siempre visible (aunque el track no tenga carátula) para que la columna de la derecha
+        # arranque siempre en el mismo lugar — sin imagen, queda como un espacio vacío.
+        self._art_button.set_sensitive(False)
+        self.append(self._art_button)
+
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True, valign=Gtk.Align.CENTER)
 
         self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.START, xalign=0)
         self._title_label.add_css_class("heading")
         self._artist_label = Gtk.Label(label="", halign=Gtk.Align.START, xalign=0)
         self._artist_label.add_css_class("dim-label")
 
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
         text_box.append(self._title_label)
         text_box.append(self._artist_label)
-
-        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, hexpand=True)
-        info_box.append(self._art_button)
-        info_box.append(text_box)
 
         self._position_label = Gtk.Label(label="0:00")
         self._duration_label = Gtk.Label(label="0:00")
@@ -134,12 +126,13 @@ class PlaybackBar(Gtk.Box):
         controls_row.append(self._repeat_button)
 
         top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        top_row.append(info_box)
+        top_row.append(text_box)
         top_row.append(controls_row)
         top_row.append(self._volume_button)
 
-        self.append(top_row)
-        self.append(seek_row)
+        right_box.append(top_row)
+        right_box.append(seek_row)
+        self.append(right_box)
 
         self._set_controls_sensitive(False)
 
@@ -173,8 +166,22 @@ class PlaybackBar(Gtk.Box):
             # embebida — la rescatamos ahora, sin red, antes de mostrarlo.
             item.art_path = self._sync_controller.resolve_local_art(item.track_id, item.local_path)
         self._update_art(item.art_path)
+        self._art_token = item.track_id
+        if not item.art_path:
+            # Tampoco tiene carátula embebida: buscamos un cover.jpg/folder.png en su carpeta de
+            # Drive antes de resignarnos a dejar el espacio vacío. Esto sí pega a la red, así que
+            # va en un hilo aparte y no bloquea el arranque de la reproducción.
+            self._sync_controller.ensure_folder_cover_art(
+                item.track_id,
+                on_complete=lambda path, track_id=item.track_id: self._on_folder_cover_ready(track_id, path),
+            )
         self._load_waveform(item)
         self.emit("now-playing-changed", item)
+
+    def _on_folder_cover_ready(self, track_id: int, art_path: str | None) -> None:
+        if track_id != self._art_token or not art_path:
+            return  # el usuario ya cambió de canción, o no había nada que mostrar
+        self._update_art(art_path)
 
     def _load_waveform(self, item: QueueItem) -> None:
         self._waveform_token = item.track_id
@@ -193,17 +200,18 @@ class PlaybackBar(Gtk.Box):
     def _update_art(self, art_path: str | None) -> None:
         self._current_art_path = art_path
         if art_path and Path(art_path).exists():
-            texture = _load_texture_at_size(art_path, _ART_THUMB_SIZE)
+            texture = load_texture_at_size(art_path, _ART_THUMB_SIZE)
             if texture:
                 self._art_picture.set_paintable(texture)
-                self._art_button.set_visible(True)
+                self._art_button.set_sensitive(True)
                 return
-        self._art_button.set_visible(False)
+        self._art_picture.set_paintable(None)
+        self._art_button.set_sensitive(False)
 
     def _on_art_clicked(self, button: Gtk.Button) -> None:
         if not self._current_art_path or not Path(self._current_art_path).exists():
             return
-        texture = _load_texture_at_size(self._current_art_path, _ART_EXPANDED_SIZE)
+        texture = load_texture_at_size(self._current_art_path, _ART_EXPANDED_SIZE)
         if not texture:
             return
         picture = Gtk.Picture(
@@ -221,6 +229,7 @@ class PlaybackBar(Gtk.Box):
         self._title_label.set_text(f"Descargando: {item.title}…")
         self._artist_label.set_text(item.artist or "")
         self._update_art(item.art_path)
+        self._art_token = None
         self._waveform_token = None
         self._waveform_scrubber.set_waveform([])
         self._waveform_scrubber.set_progress(0.0)

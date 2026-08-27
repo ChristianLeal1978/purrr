@@ -38,7 +38,7 @@ class DriveCoverFile:
     parents: list[str]
 
 
-def _looks_like_cover(name: str) -> bool:
+def looks_like_cover(name: str) -> bool:
     return bool(_COVER_NAME_PATTERN.match(name))
 
 
@@ -89,7 +89,7 @@ def scan_folder_tree(
                 continue
 
             if item["mimeType"].startswith("image/"):
-                if _looks_like_cover(item["name"]):
+                if looks_like_cover(item["name"]):
                     yield DriveCoverFile(
                         id=item["id"], name=item["name"], parents=item.get("parents", [])
                     )

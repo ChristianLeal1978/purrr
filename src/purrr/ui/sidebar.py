@@ -7,6 +7,7 @@ from gi.repository import GObject, Gtk
 
 _LIBRARY_ROW = "library"
 _FOLDERS_ROW = "folders"
+_ALBUMS_ROW = "albums"
 _SOURCES_ROW = "sources"
 _NEW_PLAYLIST_ROW = "new-playlist"
 
@@ -15,6 +16,7 @@ class Sidebar(Gtk.Box):
     __gsignals__ = {
         "library-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "folders-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "albums-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sources-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "playlist-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "new-playlist-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -33,6 +35,9 @@ class Sidebar(Gtk.Box):
         self._folders_row = self._make_row("Carpetas", "folder-symbolic")
         self._list_box.append(self._folders_row)
 
+        self._albums_row = self._make_row("Álbumes", "media-optical-symbolic")
+        self._list_box.append(self._albums_row)
+
         self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
         self._list_box.append(self._sources_row)
 
@@ -50,6 +55,24 @@ class Sidebar(Gtk.Box):
         self.append(scrolled)
 
         self._list_box.select_row(self._library_row)
+
+    def select_library_row(self) -> None:
+        self._list_box.select_row(self._library_row)
+
+    def select_folders_row(self) -> None:
+        self._list_box.select_row(self._folders_row)
+
+    def select_albums_row(self) -> None:
+        self._list_box.select_row(self._albums_row)
+
+    def select_sources_row(self) -> None:
+        self._list_box.select_row(self._sources_row)
+
+    def select_playlist_row(self, playlist_id: int) -> None:
+        for row, pid in self._playlist_row_ids.items():
+            if pid == playlist_id:
+                self._list_box.select_row(row)
+                return
 
     def _make_row(self, label: str, icon_name: str) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
@@ -83,6 +106,8 @@ class Sidebar(Gtk.Box):
             self.emit("library-selected")
         elif row is self._folders_row:
             self.emit("folders-selected")
+        elif row is self._albums_row:
+            self.emit("albums-selected")
         elif row is self._sources_row:
             self.emit("sources-selected")
         elif row is self._new_playlist_row:

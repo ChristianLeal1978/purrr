@@ -312,6 +312,32 @@ def list_tracks_in_folder(source_id: int, folder_path: str) -> list[sqlite3.Row]
     ).fetchall()
 
 
+def list_albums() -> list[sqlite3.Row]:
+    """Un renglón por álbum ya escaneado (agrupado por álbum + artista del álbum), con año,
+    cantidad de canciones y una carátula representativa (la primera que haya entre sus tracks)."""
+    return get_connection().execute(
+        """
+        SELECT album, COALESCE(album_artist, artist) AS display_artist, MAX(year) AS year,
+               COUNT(*) AS track_count, MAX(art_path) AS art_path
+        FROM tracks
+        WHERE album IS NOT NULL AND album != '' AND cache_status != 'missing'
+        GROUP BY album, display_artist
+        ORDER BY display_artist COLLATE NOCASE, year, album
+        """
+    ).fetchall()
+
+
+def list_album_tracks(album: str, display_artist: str) -> list[sqlite3.Row]:
+    return get_connection().execute(
+        """
+        SELECT * FROM tracks
+        WHERE album = ? AND COALESCE(album_artist, artist) = ? AND cache_status != 'missing'
+        ORDER BY disc_number, track_number, title
+        """,
+        (album, display_artist),
+    ).fetchall()
+
+
 # --- Playlists -------------------------------------------------------------
 
 def create_playlist(name: str) -> int:

@@ -19,7 +19,7 @@ from purrr.cache.manager import (
 )
 from purrr.db import database
 from purrr.drive.client import get_service
-from purrr.drive.scanner import DriveCoverFile, scan_folder_tree
+from purrr.drive.scanner import DriveCoverFile, looks_like_cover, scan_folder_tree
 from purrr.metadata.extractor import extract_embedded_art, extract_metadata, extract_partial_metadata
 
 _PARTIAL_FETCH_SIZES = (262_144, 2_097_152, 8_388_608)  # 256 KB, 2 MB, 8 MB
@@ -152,6 +152,60 @@ class SyncController(GObject.Object):
         if track_row["art_path"]:
             return track_row["art_path"]
         return self._resolve_embedded_art(track_row, Path(local_path))
+
+    def ensure_folder_cover_art(self, track_id: int, on_complete: Callable[[str | None], None]) -> None:
+        """Si el track no tiene arte propio, busca (y cachea para toda la carpeta) un archivo
+        tipo cover.jpg/folder.png en su misma carpeta de Drive. Hace red, así que corre en un
+        hilo aparte — llamar solo cuando resolve_local_art ya no encontró nada local."""
+        threading.Thread(
+            target=self._ensure_folder_cover_art_thread, args=(track_id, on_complete), daemon=True
+        ).start()
+
+    def _ensure_folder_cover_art_thread(
+        self, track_id: int, on_complete: Callable[[str | None], None]
+    ) -> None:
+        try:
+            track_row = database.get_track(track_id)
+            if track_row is None or track_row["art_path"]:
+                GLib.idle_add(on_complete, track_row["art_path"] if track_row else None)
+                return
+
+            creds = get_credentials()
+            service = get_service(creds)
+
+            if track_row["folder_cover_file_id"] is None:
+                # None = nunca se buscó todavía. "" = ya se buscó una vez y no había nada (no
+                # repetir el pedido a Drive en cada reproducción de esta misma carpeta).
+                cover = self._find_folder_cover_file(service, track_row["drive_parent_id"])
+                if cover is None:
+                    # Memorizamos que ya buscamos y no hay nada, para no repetir el pedido a
+                    # Drive cada vez que se reproduzca otra canción de esta misma carpeta.
+                    database.set_folder_covers(track_row["source_id"], {track_row["drive_parent_id"]: ("", "")})
+                    GLib.idle_add(on_complete, None)
+                    return
+                cover_id, cover_ext = cover
+                database.set_folder_covers(
+                    track_row["source_id"], {track_row["drive_parent_id"]: (cover_id, cover_ext)}
+                )
+                track_row = database.get_track(track_id)
+
+            self._ensure_folder_cover_art(service, track_row)
+            refreshed = database.get_track(track_id)
+            GLib.idle_add(on_complete, refreshed["art_path"] if refreshed else None)
+        except Exception:  # noqa: BLE001 — sin conexión o sin permisos: mejor sin carátula que romper la UI
+            GLib.idle_add(on_complete, None)
+
+    def _find_folder_cover_file(self, service, parent_id: str | None) -> tuple[str, str] | None:
+        if not parent_id:
+            return None
+        query = f"'{parent_id}' in parents and trashed = false and mimeType contains 'image/'"
+        response = (
+            service.files().list(q=query, fields="files(id, name)", pageSize=50, spaces="drive").execute(num_retries=3)
+        )
+        for entry in response.get("files", []):
+            if looks_like_cover(entry["name"]):
+                return entry["id"], Path(entry["name"]).suffix or ".jpg"
+        return None
 
     def ensure_waveform(
         self, drive_file_id: str, local_path: str, on_complete: Callable[[list[float]], None]

@@ -3,12 +3,13 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GObject, Gtk
 
-_BAR_GAP_FRACTION = 0.35  # fracción del ancho de cada franja que queda como espacio entre barras
+_BAR_GAP_FRACTION = 0.4  # fracción del ancho de cada franja que queda como espacio entre barras
 _MIN_BAR_HEIGHT_FRACTION = 0.08
+_MAX_BAR_RADIUS = 1.5
 
 _PLAYED_COLOR = (0.96, 0.75, 0.16, 1.0)
 _UNPLAYED_COLOR = (1.0, 1.0, 1.0, 0.28)
-_PLACEHOLDER_BARS = [0.15] * 48
+_PLACEHOLDER_BARS = [0.15] * 96
 
 
 class WaveformScrubber(Gtk.DrawingArea):
@@ -21,7 +22,7 @@ class WaveformScrubber(Gtk.DrawingArea):
 
     def __init__(self):
         super().__init__(hexpand=True)
-        self.set_size_request(-1, 40)
+        self.set_size_request(-1, 24)
         self._waveform: list[float] = []
         self._progress = 0.0
         self._drag_active = False
@@ -72,7 +73,7 @@ class WaveformScrubber(Gtk.DrawingArea):
             return
         slot_w = width / n
         bar_w = max(1.0, slot_w * (1 - _BAR_GAP_FRACTION))
-        radius = min(bar_w / 2, 2.0)
+        radius = min(bar_w / 2, _MAX_BAR_RADIUS)
         played_bars = round(self._progress * n)
 
         for i, level in enumerate(bars):

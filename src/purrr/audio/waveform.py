@@ -8,7 +8,7 @@ from gi.repository import Gst
 
 from purrr.config import WAVEFORM_CACHE_DIR
 
-_BAR_COUNT = 48
+_BAR_COUNT = 96
 _LEVEL_INTERVAL_NS = 50_000_000  # 50ms — suficientes muestras para 48 barras hasta en temas cortos
 _FLOOR_DB = -60.0
 
