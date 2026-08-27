@@ -141,6 +141,17 @@ class SyncController(GObject.Object):
 
         GLib.idle_add(self.emit, "metadata-scan-finished", updated, total)
 
+    def resolve_local_art(self, track_id: int, local_path: str) -> str | None:
+        """Para tracks que ya estaban cacheados de antes (así que ni pasan por _run_download):
+        intenta rescatar su carátula embebida al momento de reproducirlos. Solo lee el archivo
+        local, sin red, así que es seguro llamarla desde el hilo de la UI."""
+        track_row = database.get_track(track_id)
+        if track_row is None:
+            return None
+        if track_row["art_path"]:
+            return track_row["art_path"]
+        return self._resolve_embedded_art(track_row, Path(local_path))
+
     def _resolve_embedded_art(self, track_row, local_audio_path: Path) -> str | None:
         """Solo arte embebido en el archivo de audio local — no requiere red."""
         embedded = extract_embedded_art(local_audio_path)

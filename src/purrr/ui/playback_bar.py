@@ -168,6 +168,11 @@ class PlaybackBar(Gtk.Box):
         self._duration_label.set_text(_format_time(item.duration_seconds))
         self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
         self._set_controls_sensitive(True)
+        if not item.art_path:
+            # Este track ya estaba cacheado de una sesión anterior (por eso nunca pasó por
+            # download_track/_run_download), así que nadie intentó todavía sacarle la carátula
+            # embebida — la rescatamos ahora, sin red, antes de mostrarlo.
+            item.art_path = self._sync_controller.resolve_local_art(item.track_id, item.local_path)
         self._update_art(item.art_path)
         self.emit("now-playing-changed", item)
 

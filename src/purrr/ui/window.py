@@ -293,11 +293,16 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _on_track_updated(self, _controller, _track_id: int) -> None:
         # Una o más canciones terminaron de actualizarse en segundo plano (reproducción, precarga,
-        # o un escaneo de metadatos que puede disparar esta señal cientos de veces seguidas). Se
-        # agrupan (debounce) para no reconstruir toda la tabla de la biblioteca por cada una —
-        # eso congelaba la ventana durante un escaneo de metadatos grande.
+        # o un escaneo de metadatos que puede disparar esta señal cientos de veces seguidas, una
+        # por canción, cada una separada por el tiempo que tarda su pedido de red). Se agrupan
+        # para no reconstruir toda la tabla de la biblioteca por cada una.
+        #
+        # Importante: esto es un throttle (como mucho un refresco cada 400ms), no un debounce que
+        # reinicia el plazo en cada señal — si las canciones tardan más de 400ms en llegar (lo
+        # normal en un escaneo real, por la red), un debounce clásico dispara un refresco COMPLETO
+        # por cada una, y ahí es donde colgaba la ventana.
         if self._track_updated_source_id is not None:
-            GLib.source_remove(self._track_updated_source_id)
+            return  # ya hay un refresco encolado; va a recoger este cambio también
         self._track_updated_source_id = GLib.timeout_add(400, self._refresh_after_track_updates)
 
     def _refresh_after_track_updates(self) -> bool:

@@ -105,9 +105,14 @@ class LibraryView(Gtk.Box):
         self.append(scrolled)
 
     def refresh(self, track_rows: list[sqlite3.Row]) -> None:
-        self._store.remove_all()
-        for row in track_rows:
-            self._store.append(TrackObject(row))
+        # splice() en vez de remove_all() + append() en loop: reemplaza todo en una sola señal
+        # "items-changed" en lugar de miles. Con bibliotecas grandes, el loop de appends uno por
+        # uno no solo es mucho más lento (~10x) sino que además se degrada en llamadas sucesivas
+        # (cada refresh() quedaba más lento que el anterior) — vimos una biblioteca de 8900
+        # canciones pasar de ~1s a >10s tras solo un puñado de refrescos seguidos, suficiente para
+        # que la ventana pareciera colgada durante un escaneo de metadatos.
+        items = [TrackObject(row) for row in track_rows]
+        self._store.splice(0, self._store.get_n_items(), items)
 
     def get_visible_tracks(self) -> list[TrackObject]:
         """Tracks tal como se ven actualmente (respetando el orden/columna elegidos por el usuario)."""

@@ -90,7 +90,7 @@ class FolderBrowserView(Gtk.Box):
         )
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self._breadcrumb = Gtk.Label(
-            label="Elegí una carpeta a la izquierda", halign=Gtk.Align.START, xalign=0, hexpand=True
+            label="Elige una carpeta a la izquierda", halign=Gtk.Align.START, xalign=0, hexpand=True
         )
         self._breadcrumb.add_css_class("heading")
         header_row.append(self._breadcrumb)
@@ -135,14 +135,12 @@ class FolderBrowserView(Gtk.Box):
         self.append(right_box)
 
     def refresh(self, sources: list[sqlite3.Row]) -> None:
-        self._root_store.remove_all()
-        for source in sources:
-            self._root_store.append(build_source_node(source))
+        self._root_store.splice(0, self._root_store.get_n_items(), [build_source_node(s) for s in sources])
         self._current_node = None
         self._track_store.remove_all()
         self._tracks = []
         self._scan_button.set_sensitive(False)
-        self._breadcrumb.set_label("Elegí una carpeta a la izquierda")
+        self._breadcrumb.set_label("Elige una carpeta a la izquierda")
 
     def get_visible_tracks(self) -> list[TrackObject]:
         """Tracks tal como se ven ahora (respetando el orden de columna que haya elegido el
@@ -160,8 +158,7 @@ class FolderBrowserView(Gtk.Box):
         if not item.children:
             return None
         store = Gio.ListStore(item_type=FolderNode)
-        for child in item.children:
-            store.append(child)
+        store.splice(0, 0, item.children)
         return store
 
     def _on_tree_setup(self, _factory, list_item: Gtk.ListItem) -> None:
@@ -190,9 +187,7 @@ class FolderBrowserView(Gtk.Box):
         self._scan_button.set_sensitive(True)
         track_rows = database.list_tracks_in_folder(node.source_id, node.path)
         self._tracks = [TrackObject(row) for row in track_rows]
-        self._track_store.remove_all()
-        for track in self._tracks:
-            self._track_store.append(track)
+        self._track_store.splice(0, self._track_store.get_n_items(), self._tracks)
         cancion_palabra = "canción" if len(self._tracks) == 1 else "canciones"
         self._breadcrumb.set_label(f"{node.display_path}  ·  {len(self._tracks)} {cancion_palabra}")
 

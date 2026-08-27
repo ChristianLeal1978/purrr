@@ -59,9 +59,9 @@ class PlaylistView(Gtk.Box):
         self._tracks = [TrackObject(row) for row in track_rows]
         for track, row in zip(self._tracks, track_rows):
             track.playlist_track_id = row["playlist_track_id"]
-        self._store.remove_all()
-        for track in self._tracks:
-            self._store.append(track)
+        # splice() en una sola operación en vez de append() en loop — ver el comentario en
+        # LibraryView.refresh() sobre por qué el loop puede colgar la ventana.
+        self._store.splice(0, self._store.get_n_items(), self._tracks)
 
     def get_visible_tracks(self) -> list[TrackObject]:
         return self._tracks
