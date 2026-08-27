@@ -1,21 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <path fill="#0b0e14" d="
-    M64,32
-    L78,20 110,8
-    L98,50 124,66
-    L110,86 64,118
-    L18,86 4,66
-    L30,50 18,8
-    L50,20 64,32
-    Z"/>
-  <path fill="#f5f6f7" d="
-    M26,63
-    C34,54 47,53 55,60
-    C47,64 39,67 26,63
-    Z"/>
-  <path fill="#f5f6f7" d="
-    M102,63
-    C94,54 81,53 73,60
-    C81,64 89,67 102,63
-    Z"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Purrr music player icon</title>
+  <desc id="desc">A stylized musical note whose note head subtly resembles a cat, on a transparent background.</desc>
+
+  <defs>
+    <linearGradient id="noteGradient" x1="124" y1="396" x2="390" y2="92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6C3DFF"/>
+      <stop offset="0.52" stop-color="#8C5BFF"/>
+      <stop offset="1" stop-color="#C17CFF"/>
+    </linearGradient>
+    <linearGradient id="highlightGradient" x1="170" y1="345" x2="315" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.42"/>
+    </linearGradient>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#210D58" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- Main note -->
+  <g filter="url(#softShadow)">
+    <!-- Stem and flag -->
+    <path d="M302 120c0-14 9-26 22-30l88-25c10-3 20 4 20 15v58c0 13-9 25-22 29l-69 20v137c0 48-40 86-92 86-47 0-83-29-83-67 0-39 38-70 86-70 18 0 35 4 50 11V120Z" fill="url(#noteGradient)"/>
+
+    <!-- Cat ears integrated into the note head -->
+    <path d="M181 301 195 247 229 282Z" fill="url(#noteGradient)"/>
+    <path d="M276 282 309 247 322 302Z" fill="url(#noteGradient)"/>
+
+    <!-- Note head / cat face -->
+    <ellipse cx="252" cy="343" rx="86" ry="67" fill="url(#noteGradient)"/>
+  </g>
+
+  <!-- Subtle internal highlight -->
+  <path d="M329 138v158c-19-11-43-17-67-15-41 3-70 26-74 55 11-23 38-39 71-40 28-1 53 8 70 24V180l74-21c8-2 13-9 13-17v-35l-87 25Z" fill="url(#highlightGradient)"/>
+
+  <!-- Minimal cat face cut-ins -->
+  <g fill="#FFFFFF" opacity="0.92">
+    <ellipse cx="224" cy="343" rx="7" ry="9"/>
+    <ellipse cx="278" cy="343" rx="7" ry="9"/>
+    <path d="M244 363c5 4 11 6 16 0 3-4 0-8-8-8-8 0-11 4-8 8Z"/>
+  </g>
+
+  <!-- Tiny purr/sound marks -->
+  <g fill="none" stroke="#A86DFF" stroke-width="12" stroke-linecap="round" opacity="0.9">
+    <path d="M110 296c-18 14-28 34-28 56"/>
+    <path d="M83 266c-30 23-47 55-47 90" opacity="0.58"/>
+  </g>
 </svg>
