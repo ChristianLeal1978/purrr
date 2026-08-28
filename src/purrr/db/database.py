@@ -326,6 +326,22 @@ def list_tracks_in_folder(source_id: int, folder_path: str) -> list[sqlite3.Row]
     ).fetchall()
 
 
+def list_folder_siblings_by_album(track_id: int) -> list[sqlite3.Row]:
+    """Canciones de la MISMA carpeta que comparten la etiqueta de álbum de esta canción — para
+    que "Agregar a álbumes" desde una sola canción sume el álbum entero, no solo esa pista.
+    Si la canción no tiene etiqueta de álbum, no hay con qué emparejarla: devuelve solo ella."""
+    track = get_track(track_id)
+    if track is None:
+        return []
+    if not track["album"]:
+        return [track]
+    return get_connection().execute(
+        "SELECT * FROM tracks WHERE source_id = ? AND drive_folder_path = ? AND album = ? "
+        "AND cache_status != 'missing' ORDER BY disc_number, track_number, file_name",
+        (track["source_id"], track["drive_folder_path"], track["album"]),
+    ).fetchall()
+
+
 def list_tracks_in_folder_recursive(source_id: int, folder_path: str) -> list[sqlite3.Row]:
     """Como list_tracks_in_folder, pero incluye también las subcarpetas — para "Agregar a
     álbumes" desde una carpeta que tiene discos/subcarpetas adentro."""
@@ -351,8 +367,19 @@ def list_tracks_in_folder_recursive(source_id: int, folder_path: str) -> list[sq
 # álbumes" — solo así aparece en la vista Álbumes.
 
 def get_or_create_album(name: str, artist: str | None = None) -> int:
+    """Empareja por nombre + artista (no solo nombre) — el nombre ahora sale de la etiqueta de
+    la canción sin que el usuario lo revise, y dos artistas distintos con un álbum del mismo
+    nombre (p. ej. "Greatest Hits") son moneda corriente."""
     conn = get_connection()
-    row = conn.execute("SELECT id FROM albums WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    if artist:
+        row = conn.execute(
+            "SELECT id FROM albums WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE",
+            (name, artist),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM albums WHERE name = ? COLLATE NOCASE AND artist IS NULL", (name,)
+        ).fetchone()
     if row is not None:
         return row["id"]
     cursor = conn.execute(

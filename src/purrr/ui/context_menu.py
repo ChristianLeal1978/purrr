@@ -4,7 +4,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 
 def show_context_menu(widget: Gtk.Widget, x: float, y: float, items: list[tuple[str, Callable[[], None]]]) -> None:
@@ -37,5 +37,10 @@ def show_context_menu(widget: Gtk.Widget, x: float, y: float, items: list[tuple[
     rect = Gdk.Rectangle()
     rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
     popover.set_pointing_to(rect)
-    popover.connect("closed", lambda p: p.unparent())
+    # Clic en un ítem del menú: GTK activa la acción ("ctxmenu.itemN") Y cierra el popover como
+    # parte de la MISMA emisión de "clicked" del botón interno. Si desparentamos acá adentro
+    # (síncrono), a veces la cadena de padres que se usa para resolver la acción ya quedó rota
+    # cuando la activación intenta correr — el clic queda sin efecto y sin ningún error visible.
+    # Con idle_add el desparentado espera a que termine ese ciclo de eventos.
+    popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
     popover.popup()

@@ -14,10 +14,9 @@ class CoverCandidate:
     label: str
 
 
-def search_covers(album: str, artist: str | None, limit: int = 4) -> list[CoverCandidate]:
-    """Busca posibles carátulas para un álbum en la API pública de iTunes (sin API key).
+def search_covers(term: str, limit: int = 4) -> list[CoverCandidate]:
+    """Busca posibles carátulas por texto libre en la API pública de iTunes (sin API key).
     Corre red, así que hay que llamarla desde un hilo secundario."""
-    term = f"{artist} {album}" if artist else album
     query = urllib.parse.urlencode({"term": term, "entity": "album", "limit": limit})
     request = urllib.request.Request(
         f"{_SEARCH_URL}?{query}", headers={"User-Agent": _USER_AGENT}
@@ -30,9 +29,11 @@ def search_covers(album: str, artist: str | None, limit: int = 4) -> list[CoverC
         art_url = item.get("artworkUrl100")
         if not art_url:
             continue
-        full_url = art_url.replace("100x100bb", "1200x1200bb")
+        # 3000x3000bb: pedimos la mayor resolución posible — el CDN de Apple devuelve la
+        # original si es más chica, nunca la "estira" de más, así que no hay riesgo de pedir de más.
+        full_url = art_url.replace("100x100bb", "3000x3000bb")
         thumb_url = art_url.replace("100x100bb", "300x300bb")
-        label = f"{item.get('collectionName', album)} — {item.get('artistName', artist or '')}"
+        label = f"{item.get('collectionName', term)} — {item.get('artistName', '')}"
         candidates.append(CoverCandidate(thumb_url, full_url, label))
     return candidates
 

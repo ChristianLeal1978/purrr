@@ -18,8 +18,9 @@ from purrr.mpris.service import MprisService
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
-from purrr.ui.album_dialogs import open_add_to_album_dialog, open_cover_approval_dialog
+from purrr.ui.album_dialogs import open_cover_approval_dialog
 from purrr.ui.albums_view import AlbumsView
+from purrr.ui.dialogs import prompt_text
 from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
 from purrr.ui.folder_view import FolderBrowserView
@@ -30,22 +31,12 @@ from purrr.ui.playlist_view import PlaylistView
 from purrr.ui.sidebar import Sidebar
 
 
-def _prompt_text(parent: Gtk.Window, title: str, on_confirm) -> None:
-    dialog = Gtk.Dialog(title=title, modal=True, transient_for=parent)
-    entry = Gtk.Entry(margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-    dialog.get_content_area().append(entry)
-    dialog.add_button("Cancelar", Gtk.ResponseType.CANCEL)
-    dialog.add_button("Aceptar", Gtk.ResponseType.OK)
-    dialog.set_default_response(Gtk.ResponseType.OK)
-
-    def on_response(dlg, response):
-        text = entry.get_text().strip()
-        if response == Gtk.ResponseType.OK and text:
-            on_confirm(text)
-        dlg.destroy()
-
-    dialog.connect("response", on_response)
-    dialog.present()
+def _folder_name(folder_path: str | None) -> str | None:
+    """Último segmento de una ruta de carpeta ('/Abbey Road/Disc 2' -> 'Disc 2'), para cuando
+    una canción no trae etiqueta de álbum y hay que ponerle algún nombre igual."""
+    if not folder_path or folder_path == "/":
+        return None
+    return folder_path.rstrip("/").rsplit("/", 1)[-1] or None
 
 
 class PurrrWindow(Adw.ApplicationWindow):
@@ -216,7 +207,7 @@ class PurrrWindow(Adw.ApplicationWindow):
             database.create_playlist(name)
             self._sidebar.refresh_playlists(database.list_playlists())
 
-        _prompt_text(self, "Nombre de la nueva playlist", on_confirm)
+        prompt_text(self, "Nombre de la nueva playlist", on_confirm)
 
     # --- Biblioteca / reproducción ---------------------------------------
 
@@ -247,35 +238,61 @@ class PurrrWindow(Adw.ApplicationWindow):
     # --- Álbumes -----------------------------------------------------------
 
     def _on_add_to_album_requested(self, _view, track_ids) -> None:
-        self._prompt_add_to_album(list(track_ids))
+        # Clic derecho en UNA canción suma también el resto de su álbum si está en la misma
+        # carpeta (lo normal), no solo esa pista puntual.
+        expanded: set[int] = set()
+        for track_id in track_ids:
+            expanded.update(t["id"] for t in database.list_folder_siblings_by_album(track_id))
+        self._add_tracks_to_album_by_metadata(list(expanded))
 
     def _on_add_folder_to_album_requested(self, _view, source_id: int, path: str) -> None:
         tracks = database.list_tracks_in_folder_recursive(source_id, path)
         if not tracks:
             self._toast("Esa carpeta no tiene canciones para agregar.")
             return
-        self._prompt_add_to_album([t["id"] for t in tracks])
+        self._add_tracks_to_album_by_metadata([t["id"] for t in tracks])
 
-    def _prompt_add_to_album(self, track_ids: list[int]) -> None:
+    def _add_tracks_to_album_by_metadata(self, track_ids: list[int]) -> None:
+        """El nombre (y artista) del álbum sale de la etiqueta `album` de cada canción — no se
+        le pregunta nada al usuario. Si las canciones traen álbumes distintos (p. ej. una
+        carpeta con varios discos de álbumes distintos), cada una va al álbum que le corresponde
+        según su propia etiqueta."""
         if not track_ids:
             return
 
-        def on_confirm(album_id: int | None, new_name: str | None) -> None:
-            if album_id is None:
-                first_track = database.get_track(track_ids[0])
-                artist = (first_track["album_artist"] or first_track["artist"]) if first_track else None
-                album_id = database.get_or_create_album(new_name, artist)
-            added = database.add_tracks_to_album(album_id, track_ids)
-            self._albums_view.refresh(database.list_albums())
-            cancion_palabra = "canción" if added == 1 else "canciones"
-            self._toast(f"{added} {cancion_palabra} agregadas al álbum.")
+        groups: dict[tuple[str, str | None], list[int]] = {}
+        for track_id in track_ids:
+            track = database.get_track(track_id)
+            if track is None:
+                continue
+            name = track["album"] or _folder_name(track["drive_folder_path"]) or "Álbum desconocido"
+            artist = track["album_artist"] or track["artist"]
+            groups.setdefault((name, artist), []).append(track_id)
 
-        open_add_to_album_dialog(self, database.list_albums(), on_confirm)
+        if not groups:
+            return
+
+        total_added = 0
+        for (name, artist), ids in groups.items():
+            album_id = database.get_or_create_album(name, artist)
+            total_added += database.add_tracks_to_album(album_id, ids)
+
+        self._albums_view.refresh(database.list_albums())
+        cancion_palabra = "canción" if total_added == 1 else "canciones"
+        if len(groups) == 1:
+            album_name = next(iter(groups))[0]
+            self._toast(f'{total_added} {cancion_palabra} agregadas a "{album_name}".')
+        else:
+            self._toast(f"{total_added} {cancion_palabra} agregadas a {len(groups)} álbumes.")
 
     def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
+        term = f"{artist} {name}" if artist else name
+        self._search_album_art(album_id, name, term)
+
+    def _search_album_art(self, album_id: int, album_label: str, term: str) -> None:
         def worker() -> None:
             try:
-                candidates = cover_search.search_covers(name, artist or None)
+                candidates = cover_search.search_covers(term)
             except Exception as exc:  # noqa: BLE001 — sin conexión: se avisa y no se rompe la UI
                 GLib.idle_add(self._toast, f"No se pudo buscar carátulas: {exc}")
                 return
@@ -286,14 +303,18 @@ class PurrrWindow(Adw.ApplicationWindow):
                 except Exception:  # noqa: BLE001 — mejor mostrar la tarjeta sin miniatura que romper el diálogo
                     thumb_bytes = None
                 results.append((candidate, thumb_bytes))
-            GLib.idle_add(self._show_cover_approval_dialog, album_id, name, results)
+            GLib.idle_add(self._show_cover_approval_dialog, album_id, album_label, term, results)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _show_cover_approval_dialog(
-        self, album_id: int, name: str, results: list[tuple[CoverCandidate, bytes | None]]
+        self, album_id: int, album_label: str, term: str, results: list[tuple[CoverCandidate, bytes | None]]
     ) -> bool:
-        open_cover_approval_dialog(self, name, results, lambda candidate: self._save_album_art(album_id, candidate))
+        open_cover_approval_dialog(
+            self, album_label, term, results,
+            on_approve=lambda candidate: self._save_album_art(album_id, candidate),
+            on_search_again=lambda new_term: self._search_album_art(album_id, album_label, new_term),
+        )
         return False
 
     def _save_album_art(self, album_id: int, candidate: CoverCandidate) -> None:
