@@ -326,29 +326,111 @@ def list_tracks_in_folder(source_id: int, folder_path: str) -> list[sqlite3.Row]
     ).fetchall()
 
 
+def list_tracks_in_folder_recursive(source_id: int, folder_path: str) -> list[sqlite3.Row]:
+    """Como list_tracks_in_folder, pero incluye también las subcarpetas — para "Agregar a
+    álbumes" desde una carpeta que tiene discos/subcarpetas adentro."""
+    conn = get_connection()
+    if not folder_path or folder_path == "/":
+        return conn.execute(
+            "SELECT * FROM tracks WHERE source_id = ? AND cache_status != 'missing' "
+            "ORDER BY drive_folder_path, disc_number, track_number, file_name",
+            (source_id,),
+        ).fetchall()
+    prefix = folder_path.rstrip("/") + "/%"
+    return conn.execute(
+        "SELECT * FROM tracks WHERE source_id = ? AND cache_status != 'missing' "
+        "AND (drive_folder_path = ? OR drive_folder_path LIKE ?) "
+        "ORDER BY drive_folder_path, disc_number, track_number, file_name",
+        (source_id, folder_path, prefix),
+    ).fetchall()
+
+
+# --- Álbumes -----------------------------------------------------------
+# A diferencia de `tracks.album` (la etiqueta cruda del archivo, usada para mostrar/buscar en
+# la biblioteca), un álbum acá es una entidad que el usuario arma a mano con "Agregar a
+# álbumes" — solo así aparece en la vista Álbumes.
+
+def get_or_create_album(name: str, artist: str | None = None) -> int:
+    conn = get_connection()
+    row = conn.execute("SELECT id FROM albums WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    if row is not None:
+        return row["id"]
+    cursor = conn.execute(
+        "INSERT INTO albums (name, artist) VALUES (?, ?)", (name, artist)
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def _backfill_album_art(conn: sqlite3.Connection, album_id: int) -> None:
+    """Si el álbum todavía no tiene carátula, usa la primera que encuentre entre sus tracks
+    (embebida o de carpeta) en vez de obligar a buscarla en internet de una."""
+    row = conn.execute("SELECT art_path FROM albums WHERE id = ?", (album_id,)).fetchone()
+    if row is None or row["art_path"]:
+        return
+    art_row = conn.execute(
+        "SELECT t.art_path FROM album_tracks atk JOIN tracks t ON t.id = atk.track_id "
+        "WHERE atk.album_id = ? AND t.art_path IS NOT NULL LIMIT 1",
+        (album_id,),
+    ).fetchone()
+    if art_row is not None:
+        conn.execute(
+            "UPDATE albums SET art_path = ?, updated_at = datetime('now') WHERE id = ?",
+            (art_row["art_path"], album_id),
+        )
+        conn.commit()
+
+
+def add_tracks_to_album(album_id: int, track_ids: list[int]) -> int:
+    """Agrega canciones a un álbum (ignora las que ya estaban). Devuelve cuántas se sumaron."""
+    conn = get_connection()
+    added = 0
+    for track_id in track_ids:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO album_tracks (album_id, track_id) VALUES (?, ?)",
+            (album_id, track_id),
+        )
+        added += cursor.rowcount
+    conn.commit()
+    _backfill_album_art(conn, album_id)
+    return added
+
+
+def update_album_art(album_id: int, art_path: str) -> None:
+    conn = get_connection()
+    conn.execute(
+        "UPDATE albums SET art_path = ?, updated_at = datetime('now') WHERE id = ?",
+        (art_path, album_id),
+    )
+    conn.commit()
+
+
 def list_albums() -> list[sqlite3.Row]:
-    """Un renglón por álbum ya escaneado (agrupado por álbum + artista del álbum), con año,
-    cantidad de canciones y una carátula representativa (la primera que haya entre sus tracks)."""
+    """Un renglón por álbum armado a mano por el usuario, con año, cantidad de canciones
+    (contando solo las que siguen presentes) y su carátula."""
     return get_connection().execute(
         """
-        SELECT album, COALESCE(album_artist, artist) AS display_artist, MAX(year) AS year,
-               COUNT(*) AS track_count, MAX(art_path) AS art_path
-        FROM tracks
-        WHERE album IS NOT NULL AND album != '' AND cache_status != 'missing'
-        GROUP BY album, display_artist
+        SELECT a.id AS id, a.name AS album, a.artist AS display_artist, a.art_path AS art_path,
+               COUNT(t.id) AS track_count, MAX(t.year) AS year
+        FROM albums a
+        JOIN album_tracks atk ON atk.album_id = a.id
+        JOIN tracks t ON t.id = atk.track_id AND t.cache_status != 'missing'
+        GROUP BY a.id
+        HAVING track_count > 0
         ORDER BY display_artist COLLATE NOCASE, year, album
         """
     ).fetchall()
 
 
-def list_album_tracks(album: str, display_artist: str) -> list[sqlite3.Row]:
+def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
     return get_connection().execute(
         """
-        SELECT * FROM tracks
-        WHERE album = ? AND COALESCE(album_artist, artist) = ? AND cache_status != 'missing'
-        ORDER BY disc_number, track_number, title
+        SELECT t.* FROM tracks t
+        JOIN album_tracks atk ON atk.track_id = t.id
+        WHERE atk.album_id = ? AND t.cache_status != 'missing'
+        ORDER BY t.disc_number, t.track_number, t.title
         """,
-        (album, display_artist),
+        (album_id,),
     ).fetchall()
 
 

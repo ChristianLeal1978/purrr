@@ -6,7 +6,7 @@ from pathlib import Path
 from googleapiclient.discovery import Resource
 from googleapiclient.http import MediaIoBaseDownload
 
-from purrr.config import ART_CACHE_DIR, AUDIO_CACHE_DIR
+from purrr.config import ALBUM_ART_CACHE_DIR, ART_CACHE_DIR, AUDIO_CACHE_DIR
 from purrr.drive.scanner import DriveFile
 
 _MIME_TO_EXT = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png"}
@@ -23,6 +23,15 @@ def art_cache_path(key: str, ext: str) -> Path:
 
 def save_art_bytes(data: bytes, mime: str, key: str) -> Path:
     path = art_cache_path(key, _MIME_TO_EXT.get(mime, ".jpg"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def save_album_art_bytes(data: bytes, album_id: int, ext: str = ".jpg") -> Path:
+    """Guarda en una carpeta local la carátula que el usuario aprobó buscar en internet para
+    un álbum armado a mano (ver purrr.metadata.cover_search)."""
+    path = ALBUM_ART_CACHE_DIR / f"{album_id}{ext}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path

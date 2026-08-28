@@ -63,6 +63,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_playlist_tracks_unique_pos
     ON playlist_tracks(playlist_id, position);
 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
 
+CREATE TABLE IF NOT EXISTS albums (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    artist      TEXT,
+    art_path    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS album_tracks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    album_id    INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(album_id, track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(album_id);
+CREATE INDEX IF NOT EXISTS idx_album_tracks_track ON album_tracks(track_id);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT

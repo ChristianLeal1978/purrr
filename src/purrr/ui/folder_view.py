@@ -3,9 +3,11 @@ import sqlite3
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GObject, Gtk
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GObject, Gtk
 
 from purrr.db import database
+from purrr.ui.context_menu import show_context_menu
 from purrr.ui.library_view import TrackObject, apply_now_playing, text_column
 
 
@@ -62,6 +64,8 @@ class FolderBrowserView(Gtk.Box):
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "scan-folder-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str)),  # source_id, path
+        "add-to-album-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # list[int]
+        "add-folder-to-album-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str)),  # source_id, path
     }
 
     def __init__(self):
@@ -121,13 +125,31 @@ class FolderBrowserView(Gtk.Box):
         self._track_selection = Gtk.NoSelection(model=self._track_sort_model)
         self._track_view = Gtk.ColumnView(model=self._track_selection)
         self._track_view.append_column(
-            text_column("Pista", "track_label", sortable=True, sort_attr="track_number_sort")
+            text_column(
+                "Pista", "track_label", sortable=True, sort_attr="track_number_sort",
+                on_context_menu=self._on_track_context_menu,
+            )
         )
-        self._track_view.append_column(text_column("Título", "title", expand=True, sortable=True))
-        self._track_view.append_column(text_column("Artista", "artist", expand=True, sortable=True))
-        self._track_view.append_column(text_column("Álbum", "album", expand=True, sortable=True))
         self._track_view.append_column(
-            text_column("Duración", "duration_str", sortable=True, sort_attr="duration_seconds")
+            text_column(
+                "Título", "title", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._track_view.append_column(
+            text_column(
+                "Artista", "artist", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._track_view.append_column(
+            text_column(
+                "Álbum", "album", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._track_view.append_column(
+            text_column(
+                "Duración", "duration_str", sortable=True, sort_attr="duration_seconds",
+                on_context_menu=self._on_track_context_menu,
+            )
         )
         self._track_view.connect("activate", self._on_track_activated)
         self._track_sort_model.set_sorter(self._track_view.get_sorter())
@@ -204,6 +226,12 @@ class FolderBrowserView(Gtk.Box):
         expander.set_child(box)
         list_item.set_child(expander)
 
+        gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        gesture.connect(
+            "pressed", lambda _g, _n, x, y, li=list_item, w=box: self._on_folder_context_menu(li, w, x, y)
+        )
+        box.add_controller(gesture)
+
     def _on_tree_bind(self, _factory, list_item: Gtk.ListItem) -> None:
         row: Gtk.TreeListRow = list_item.get_item()
         expander: Gtk.TreeExpander = list_item.get_child()
@@ -232,6 +260,24 @@ class FolderBrowserView(Gtk.Box):
     def _on_track_activated(self, _view, position: int) -> None:
         track: TrackObject = self._track_selection.get_item(position)
         self.emit("track-activated", track.track_id)
+
+    def _on_track_context_menu(self, list_item: Gtk.ListItem, widget: Gtk.Widget, x: float, y: float) -> None:
+        track: TrackObject = list_item.get_item()
+        show_context_menu(
+            widget, x, y,
+            [("Agregar a álbumes", lambda: self.emit("add-to-album-requested", [track.track_id]))],
+        )
+
+    def _on_folder_context_menu(self, list_item: Gtk.ListItem, widget: Gtk.Widget, x: float, y: float) -> None:
+        row: Gtk.TreeListRow = list_item.get_item()
+        node: FolderNode = row.get_item()
+        show_context_menu(
+            widget, x, y,
+            [(
+                "Agregar a álbumes",
+                lambda: self.emit("add-folder-to-album-requested", node.source_id, node.path),
+            )],
+        )
 
     def _on_scan_clicked(self, _button) -> None:
         if self._current_node is not None:

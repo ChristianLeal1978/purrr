@@ -1,10 +1,13 @@
 import sqlite3
+from collections.abc import Callable
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gio, GLib, GObject, Gtk, Pango
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
+
+from purrr.ui.context_menu import show_context_menu
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -55,13 +58,27 @@ def _sync_playing_style(label: Gtk.Label, track: TrackObject) -> None:
 
 
 def text_column(
-    title: str, attr: str, expand: bool = False, sortable: bool = False, sort_attr: str | None = None
+    title: str,
+    attr: str,
+    expand: bool = False,
+    sortable: bool = False,
+    sort_attr: str | None = None,
+    on_context_menu: Callable[[Gtk.ListItem, Gtk.Widget, float, float], None] | None = None,
 ) -> Gtk.ColumnViewColumn:
     factory = Gtk.SignalListItemFactory()
 
     def on_setup(_factory, list_item: Gtk.ListItem) -> None:
         label = Gtk.Label(halign=Gtk.Align.START, ellipsize=Pango.EllipsizeMode.END)
         list_item.set_child(label)
+        if on_context_menu is not None:
+            # Se captura `list_item` (no el track) porque GTK recicla este mismo Gtk.ListItem
+            # entre filas al hacer scroll — list_item.get_item() siempre da el track ACTUAL
+            # de la fila, aun si el clic ocurre mucho después de este setup().
+            gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+            gesture.connect(
+                "pressed", lambda _g, _n, x, y, li=list_item, lbl=label: on_context_menu(li, lbl, x, y)
+            )
+            label.add_controller(gesture)
 
     def on_bind(_factory, list_item: Gtk.ListItem) -> None:
         label = list_item.get_child()
@@ -105,6 +122,7 @@ class LibraryView(Gtk.Box):
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "search-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "add-to-album-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # list[int]
     }
 
     def __init__(self):
@@ -123,11 +141,29 @@ class LibraryView(Gtk.Box):
         self._selection = Gtk.MultiSelection(model=self._sort_model)
 
         self._column_view = Gtk.ColumnView(model=self._selection)
-        self._column_view.append_column(text_column("Título", "title", expand=True, sortable=True))
-        self._column_view.append_column(text_column("Artista", "artist", expand=True, sortable=True))
-        self._column_view.append_column(text_column("Álbum", "album", expand=True, sortable=True))
         self._column_view.append_column(
-            text_column("Duración", "duration_str", sortable=True, sort_attr="duration_seconds")
+            text_column(
+                "Título", "title", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._column_view.append_column(
+            text_column(
+                "Artista", "artist", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._column_view.append_column(
+            text_column(
+                "Álbum", "album", expand=True, sortable=True, on_context_menu=self._on_track_context_menu
+            )
+        )
+        self._column_view.append_column(
+            text_column(
+                "Duración",
+                "duration_str",
+                sortable=True,
+                sort_attr="duration_seconds",
+                on_context_menu=self._on_track_context_menu,
+            )
         )
         self._column_view.connect("activate", self._on_row_activated)
         self._sort_model.set_sorter(self._column_view.get_sorter())
@@ -178,3 +214,18 @@ class LibraryView(Gtk.Box):
     def _on_row_activated(self, _view, position: int) -> None:
         track: TrackObject = self._selection.get_item(position)
         self.emit("track-activated", track.track_id)
+
+    def _on_track_context_menu(self, list_item: Gtk.ListItem, widget: Gtk.Widget, x: float, y: float) -> None:
+        track: TrackObject = list_item.get_item()
+        position = list_item.get_position()
+        bitset = self._selection.get_selection()
+        # Si el clic derecho cae sobre una fila que ya formaba parte de una selección múltiple,
+        # la acción aplica a toda la selección; si no, solo a esa fila.
+        if bitset.get_size() > 1 and bitset.contains(position):
+            track_ids = self.get_selected_track_ids()
+        else:
+            track_ids = [track.track_id]
+
+        show_context_menu(
+            widget, x, y, [("Agregar a álbumes", lambda: self.emit("add-to-album-requested", track_ids))]
+        )

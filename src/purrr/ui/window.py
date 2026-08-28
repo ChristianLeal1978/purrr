@@ -1,4 +1,6 @@
 import threading
+import urllib.parse
+from pathlib import Path
 
 import gi
 
@@ -7,12 +9,16 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk
 
 from purrr.auth.oauth import get_credentials
+from purrr.cache.manager import save_album_art_bytes
 from purrr.db import database
 from purrr.drive.client import get_service
+from purrr.metadata import cover_search
+from purrr.metadata.cover_search import CoverCandidate
 from purrr.mpris.service import MprisService
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
 from purrr.sync.controller import SyncController
+from purrr.ui.album_dialogs import open_add_to_album_dialog, open_cover_approval_dialog
 from purrr.ui.albums_view import AlbumsView
 from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
@@ -106,11 +112,15 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._library_view.connect("track-activated", self._on_library_track_activated)
         self._library_view.connect("search-changed", self._on_library_search_changed)
+        self._library_view.connect("add-to-album-requested", self._on_add_to_album_requested)
 
         self._folder_view.connect("track-activated", self._on_folder_track_activated)
         self._folder_view.connect("scan-folder-requested", self._on_folder_scan_requested)
+        self._folder_view.connect("add-to-album-requested", self._on_add_to_album_requested)
+        self._folder_view.connect("add-folder-to-album-requested", self._on_add_folder_to_album_requested)
 
         self._albums_view.connect("album-activated", self._on_album_activated)
+        self._albums_view.connect("album-art-search-requested", self._on_album_art_search_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -229,12 +239,81 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_folder_scan_requested(self, _view, source_id: int, folder_path: str) -> None:
         self._sync_controller.start_metadata_scan(source_id, folder_path)
 
-    def _on_album_activated(self, _view, album: str, display_artist: str) -> None:
-        tracks = [
-            LibraryTrackObject(row) for row in database.list_album_tracks(album, display_artist)
-        ]
+    def _on_album_activated(self, _view, album_id: int) -> None:
+        tracks = [LibraryTrackObject(row) for row in database.list_album_tracks(album_id)]
         if tracks:
             self._play_from_track_list(tracks, tracks[0].track_id)
+
+    # --- Álbumes -----------------------------------------------------------
+
+    def _on_add_to_album_requested(self, _view, track_ids) -> None:
+        self._prompt_add_to_album(list(track_ids))
+
+    def _on_add_folder_to_album_requested(self, _view, source_id: int, path: str) -> None:
+        tracks = database.list_tracks_in_folder_recursive(source_id, path)
+        if not tracks:
+            self._toast("Esa carpeta no tiene canciones para agregar.")
+            return
+        self._prompt_add_to_album([t["id"] for t in tracks])
+
+    def _prompt_add_to_album(self, track_ids: list[int]) -> None:
+        if not track_ids:
+            return
+
+        def on_confirm(album_id: int | None, new_name: str | None) -> None:
+            if album_id is None:
+                first_track = database.get_track(track_ids[0])
+                artist = (first_track["album_artist"] or first_track["artist"]) if first_track else None
+                album_id = database.get_or_create_album(new_name, artist)
+            added = database.add_tracks_to_album(album_id, track_ids)
+            self._albums_view.refresh(database.list_albums())
+            cancion_palabra = "canción" if added == 1 else "canciones"
+            self._toast(f"{added} {cancion_palabra} agregadas al álbum.")
+
+        open_add_to_album_dialog(self, database.list_albums(), on_confirm)
+
+    def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
+        def worker() -> None:
+            try:
+                candidates = cover_search.search_covers(name, artist or None)
+            except Exception as exc:  # noqa: BLE001 — sin conexión: se avisa y no se rompe la UI
+                GLib.idle_add(self._toast, f"No se pudo buscar carátulas: {exc}")
+                return
+            results = []
+            for candidate in candidates:
+                try:
+                    thumb_bytes = cover_search.download_cover(candidate.thumb_url)
+                except Exception:  # noqa: BLE001 — mejor mostrar la tarjeta sin miniatura que romper el diálogo
+                    thumb_bytes = None
+                results.append((candidate, thumb_bytes))
+            GLib.idle_add(self._show_cover_approval_dialog, album_id, name, results)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_cover_approval_dialog(
+        self, album_id: int, name: str, results: list[tuple[CoverCandidate, bytes | None]]
+    ) -> bool:
+        open_cover_approval_dialog(self, name, results, lambda candidate: self._save_album_art(album_id, candidate))
+        return False
+
+    def _save_album_art(self, album_id: int, candidate: CoverCandidate) -> None:
+        def worker() -> None:
+            try:
+                data = cover_search.download_cover(candidate.full_url)
+                ext = Path(urllib.parse.urlparse(candidate.full_url).path).suffix or ".jpg"
+                path = save_album_art_bytes(data, album_id, ext)
+                database.update_album_art(album_id, str(path))
+            except Exception as exc:  # noqa: BLE001 — sin conexión: se avisa y no se rompe la UI
+                GLib.idle_add(self._toast, f"No se pudo guardar la carátula: {exc}")
+                return
+            GLib.idle_add(self._on_album_art_saved)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_album_art_saved(self) -> bool:
+        self._albums_view.refresh(database.list_albums())
+        self._toast("Carátula guardada.")
+        return False
 
     def _play_from_track_list(self, tracks, track_id: int) -> None:
         index = next((i for i, t in enumerate(tracks) if t.track_id == track_id), None)
