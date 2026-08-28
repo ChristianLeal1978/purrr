@@ -6,7 +6,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 from purrr.auth.oauth import get_credentials
 from purrr.cache.manager import save_album_art_bytes
@@ -113,6 +113,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.connect("album-activated", self._on_album_activated)
         self._albums_view.connect("album-art-search-requested", self._on_album_art_search_requested)
         self._albums_view.connect("album-rescan-requested", self._on_album_rescan_requested)
+        self._albums_view.connect("album-art-upload-requested", self._on_album_art_upload_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -313,6 +314,40 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.refresh(database.list_albums())
         cancion_palabra = "canción" if added == 1 else "canciones"
         self._toast(f'Se agregaron {added} {cancion_palabra} nuevas a "{album["name"]}".')
+
+    def _on_album_art_upload_requested(self, _view, album_id: int) -> None:
+        image_filter = Gtk.FileFilter(name="Imágenes")
+        image_filter.add_mime_type("image/jpeg")
+        image_filter.add_mime_type("image/png")
+        image_filter.add_mime_type("image/webp")
+        image_filter.add_mime_type("image/gif")
+        filters = Gio.ListStore(item_type=Gtk.FileFilter)
+        filters.append(image_filter)
+
+        dialog = Gtk.FileDialog(
+            title="Elegir imagen de carátula", filters=filters, default_filter=image_filter
+        )
+
+        def on_open_finished(dlg, result) -> None:
+            try:
+                gfile = dlg.open_finish(result)
+            except GLib.Error:
+                return  # el usuario canceló el diálogo, o no se pudo abrir
+            path = gfile.get_path()
+            if not path:
+                return
+            try:
+                data = Path(path).read_bytes()
+                ext = Path(path).suffix or ".jpg"
+                art_path = save_album_art_bytes(data, album_id, ext)
+            except OSError as exc:
+                self._toast(f"No se pudo cargar la imagen: {exc}")
+                return
+            database.update_album_art(album_id, str(art_path))
+            self._albums_view.refresh(database.list_albums())
+            self._toast("Carátula guardada.")
+
+        dialog.open(self, None, on_open_finished)
 
     def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
         term = f"{artist} {name}" if artist else name

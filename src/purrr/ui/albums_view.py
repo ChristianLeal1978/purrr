@@ -48,6 +48,7 @@ class AlbumsView(Gtk.Box):
         "album-art-search-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str, str)),
         # album_id, album name, display_artist
         "album-rescan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
+        "album-art-upload-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
     }
 
     def __init__(self):
@@ -172,10 +173,16 @@ class AlbumsView(Gtk.Box):
         album: AlbumObject = list_item.get_item()
         show_context_menu(
             widget, x, y,
-            [(
-                "Revisar carpeta por canciones nuevas",
-                lambda: self.emit("album-rescan-requested", album.album_id),
-            )],
+            [
+                (
+                    "Revisar carpeta por canciones nuevas",
+                    lambda: self.emit("album-rescan-requested", album.album_id),
+                ),
+                (
+                    "Cargar imagen como carátula",
+                    lambda: self.emit("album-art-upload-requested", album.album_id),
+                ),
+            ],
         )
 
     def _on_activate(self, _view, position: int) -> None:
