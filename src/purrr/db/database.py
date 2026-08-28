@@ -423,6 +423,10 @@ def add_tracks_to_album(album_id: int, track_ids: list[int]) -> int:
     return added
 
 
+def get_album(album_id: int) -> sqlite3.Row | None:
+    return get_connection().execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
+
+
 def update_album_art(album_id: int, art_path: str) -> None:
     conn = get_connection()
     conn.execute(

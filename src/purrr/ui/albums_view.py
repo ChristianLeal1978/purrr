@@ -3,12 +3,20 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gio, GObject, Gtk, Pango
+from gi.repository import Gdk, Gio, GObject, Gtk, Pango
 
+from purrr.ui.context_menu import show_context_menu
 from purrr.ui.textures import load_texture_at_size
 
 _ART_SIZE = 160
+
+_SORT_OPTIONS = [
+    ("artist", "Artista"),
+    ("title", "Título"),
+    ("year", "Año"),
+]
 
 
 class AlbumObject(GObject.Object):
@@ -39,12 +47,26 @@ class AlbumsView(Gtk.Box):
         "album-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
         "album-art-search-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str, str)),
         # album_id, album name, display_artist
+        "album-rescan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
     }
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self._sort_key = "artist"
         self._store = Gio.ListStore(item_type=AlbumObject)
-        selection = Gtk.NoSelection(model=self._store)
+        self._sorter = Gtk.CustomSorter.new(self._compare_albums)
+        self._sort_model = Gtk.SortListModel(model=self._store, sorter=self._sorter)
+        selection = Gtk.NoSelection(model=self._sort_model)
+
+        header = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            margin_top=8, margin_bottom=4, margin_start=8, margin_end=8,
+        )
+        header.append(Gtk.Label(label="Ordenar por:"))
+        self._sort_dropdown = Gtk.DropDown.new_from_strings([label for _key, label in _SORT_OPTIONS])
+        self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
+        header.append(self._sort_dropdown)
+        self.append(header)
 
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._on_setup)
@@ -62,6 +84,19 @@ class AlbumsView(Gtk.Box):
 
     def refresh(self, album_rows) -> None:
         self._store.splice(0, self._store.get_n_items(), [AlbumObject(row) for row in album_rows])
+
+    def _on_sort_changed(self, dropdown: Gtk.DropDown, _pspec) -> None:
+        self._sort_key = _SORT_OPTIONS[dropdown.get_selected()][0]
+        self._sorter.changed(Gtk.SorterChange.DIFFERENT)
+
+    def _compare_albums(self, a: "AlbumObject", b: "AlbumObject", _data=None) -> int:
+        if self._sort_key == "title":
+            va, vb = a.album.lower(), b.album.lower()
+        elif self._sort_key == "year":
+            va, vb = (a.year or 0), (b.year or 0)
+        else:
+            va, vb = a.display_artist.lower(), b.display_artist.lower()
+        return -1 if va < vb else (1 if va > vb else 0)
 
     def _on_setup(self, _factory, list_item: Gtk.ListItem) -> None:
         card = Gtk.Box(
@@ -104,6 +139,12 @@ class AlbumsView(Gtk.Box):
         list_item.set_child(card)
         list_item.purrr_art_button = art_search_button
 
+        context_gesture = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        context_gesture.connect(
+            "pressed", lambda _g, _n, x, y, li=list_item, w=card: self._on_album_context_menu(li, w, x, y)
+        )
+        card.add_controller(context_gesture)
+
     def _on_bind(self, _factory, list_item: Gtk.ListItem) -> None:
         card = list_item.get_child()
         album: AlbumObject = list_item.get_item()
@@ -127,6 +168,17 @@ class AlbumsView(Gtk.Box):
         album: AlbumObject = list_item.get_item()
         self.emit("album-art-search-requested", album.album_id, album.album, album.display_artist)
 
+    def _on_album_context_menu(self, list_item: Gtk.ListItem, widget: Gtk.Widget, x: float, y: float) -> None:
+        album: AlbumObject = list_item.get_item()
+        show_context_menu(
+            widget, x, y,
+            [(
+                "Revisar carpeta por canciones nuevas",
+                lambda: self.emit("album-rescan-requested", album.album_id),
+            )],
+        )
+
     def _on_activate(self, _view, position: int) -> None:
-        album: AlbumObject = self._store.get_item(position)
+        # `position` es un índice del modelo que ve el GridView (el ordenado), no del store crudo.
+        album: AlbumObject = self._sort_model.get_item(position)
         self.emit("album-activated", album.album_id)

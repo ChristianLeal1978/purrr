@@ -3,7 +3,8 @@ from collections.abc import Callable
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+gi.require_version("Pango", "1.0")
+from gi.repository import Gtk, Pango
 
 from purrr.metadata.cover_search import CoverCandidate
 from purrr.ui.dialogs import prompt_text
@@ -59,6 +60,16 @@ def open_cover_approval_dialog(
         texture = load_texture_from_bytes(thumb_bytes, _THUMB_SIZE) if thumb_bytes else None
         picture.set_paintable(texture)
 
+        # Etiqueta VISIBLE (no solo tooltip al pasar el mouse) — para que se note a simple
+        # vista que una nueva búsqueda trajo resultados distintos, y no solo carátulas
+        # abstractas que a ojo pueden parecer "las mismas de antes".
+        caption = Gtk.Label(
+            label=candidate.label, wrap=True, justify=Gtk.Justification.CENTER,
+            lines=2, ellipsize=Pango.EllipsizeMode.END, max_width_chars=16,
+        )
+        caption.add_css_class("caption")
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, width_request=_THUMB_SIZE)
         button = Gtk.Button(child=picture, has_frame=False, tooltip_text=candidate.label)
 
         def on_click(_button, c=candidate):
@@ -66,7 +77,9 @@ def open_cover_approval_dialog(
             dialog.destroy()
 
         button.connect("clicked", on_click)
-        flow.append(button)
+        card.append(button)
+        card.append(caption)
+        flow.append(card)
 
     scrolled = Gtk.ScrolledWindow(vexpand=True)
     scrolled.set_child(flow)

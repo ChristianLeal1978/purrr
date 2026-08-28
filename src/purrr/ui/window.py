@@ -112,6 +112,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._albums_view.connect("album-activated", self._on_album_activated)
         self._albums_view.connect("album-art-search-requested", self._on_album_art_search_requested)
+        self._albums_view.connect("album-rescan-requested", self._on_album_rescan_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -284,6 +285,34 @@ class PurrrWindow(Adw.ApplicationWindow):
             self._toast(f'{total_added} {cancion_palabra} agregadas a "{album_name}".')
         else:
             self._toast(f"{total_added} {cancion_palabra} agregadas a {len(groups)} álbumes.")
+
+    def _on_album_rescan_requested(self, _view, album_id: int) -> None:
+        """Vuelve a mirar la(s) carpeta(s) de donde salieron las canciones de este álbum, por si
+        se agregaron canciones nuevas con la misma etiqueta de álbum desde la última vez."""
+        album = database.get_album(album_id)
+        if album is None:
+            return
+        existing_tracks = database.list_album_tracks(album_id)
+        existing_ids = {t["id"] for t in existing_tracks}
+        folders = {(t["source_id"], t["drive_folder_path"]) for t in existing_tracks}
+
+        target_name = (album["name"] or "").strip().lower()
+        new_ids = []
+        for source_id, folder_path in folders:
+            for track in database.list_tracks_in_folder(source_id, folder_path):
+                if track["id"] in existing_ids:
+                    continue
+                if (track["album"] or "").strip().lower() == target_name:
+                    new_ids.append(track["id"])
+
+        if not new_ids:
+            self._toast(f'No hay canciones nuevas para "{album["name"]}".')
+            return
+
+        added = database.add_tracks_to_album(album_id, new_ids)
+        self._albums_view.refresh(database.list_albums())
+        cancion_palabra = "canción" if added == 1 else "canciones"
+        self._toast(f'Se agregaron {added} {cancion_palabra} nuevas a "{album["name"]}".')
 
     def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
         term = f"{artist} {name}" if artist else name
