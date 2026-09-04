@@ -1,5 +1,7 @@
+import json
 import sqlite3
 import threading
+import uuid as uuid_lib
 from importlib import resources
 
 from purrr.config import DB_PATH
@@ -25,19 +27,87 @@ def get_connection() -> sqlite3.Connection:
     return _local.conn
 
 
-_TRACK_COLUMN_MIGRATIONS = {
-    "art_path": "ALTER TABLE tracks ADD COLUMN art_path TEXT",
-    "folder_cover_file_id": "ALTER TABLE tracks ADD COLUMN folder_cover_file_id TEXT",
-    "folder_cover_ext": "ALTER TABLE tracks ADD COLUMN folder_cover_ext TEXT",
+_COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
+    "tracks": {
+        "art_path": "ALTER TABLE tracks ADD COLUMN art_path TEXT",
+        "folder_cover_file_id": "ALTER TABLE tracks ADD COLUMN folder_cover_file_id TEXT",
+        "folder_cover_ext": "ALTER TABLE tracks ADD COLUMN folder_cover_ext TEXT",
+    },
+    "sources": {
+        "provider": "ALTER TABLE sources ADD COLUMN provider TEXT NOT NULL DEFAULT 'drive'",
+    },
+    "playlists": {
+        "uuid": "ALTER TABLE playlists ADD COLUMN uuid TEXT",
+        "deleted_at": "ALTER TABLE playlists ADD COLUMN deleted_at TEXT",
+    },
+    "albums": {
+        "uuid": "ALTER TABLE albums ADD COLUMN uuid TEXT",
+        "deleted_at": "ALTER TABLE albums ADD COLUMN deleted_at TEXT",
+    },
+    "album_tracks": {
+        "updated_at": (
+            "ALTER TABLE album_tracks ADD COLUMN updated_at TEXT NOT NULL "
+            "DEFAULT (datetime('now'))"
+        ),
+        "deleted_at": "ALTER TABLE album_tracks ADD COLUMN deleted_at TEXT",
+    },
 }
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Agrega columnas nuevas a bases de datos ya existentes (CREATE TABLE IF NOT EXISTS no las toca)."""
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
-    for column, statement in _TRACK_COLUMN_MIGRATIONS.items():
-        if column not in existing:
-            conn.execute(statement)
+    for table, migrations in _COLUMN_MIGRATIONS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, statement in migrations.items():
+            if column not in existing:
+                conn.execute(statement)
+    conn.commit()
+    _backfill_uuids(conn)
+    _migrate_playlist_tracks_to_items(conn)
+
+
+def _migrate_playlist_tracks_to_items(conn: sqlite3.Connection) -> None:
+    """Fase 4: `playlist_tracks` (FK entero, solo Drive) se reemplaza por
+    `playlist_items` (track_ref de texto, Drive o Spotify — misma forma que
+    `cloud/schema.sql`). En una base de la Fase 0/1 que todavía tenga la tabla
+    vieja, copia cada fila armando `track_ref = 'drive:<drive_file_id>'` y la
+    borra — no queda como código muerto una vez migrada."""
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "playlist_tracks" not in tables:
+        return
+    rows = conn.execute(
+        "SELECT pt.playlist_id, pt.position, pt.added_at, "
+        "t.drive_file_id FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO playlist_items "
+            "(playlist_id, track_ref, position, added_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                row["playlist_id"],
+                f"drive:{row['drive_file_id']}",
+                row["position"],
+                row["added_at"],
+                row["added_at"],
+            ),
+        )
+    conn.execute("DROP TABLE playlist_tracks")
+    conn.commit()
+
+
+def _backfill_uuids(conn: sqlite3.Connection) -> None:
+    """Las filas de playlists/albums creadas antes de que existiera la columna
+    `uuid` (Fase 0, sync entre dispositivos) necesitan una identidad estable."""
+    for table in ("playlists", "albums"):
+        rows = conn.execute(f"SELECT id FROM {table} WHERE uuid IS NULL").fetchall()
+        for row in rows:
+            conn.execute(
+                f"UPDATE {table} SET uuid = ? WHERE id = ?", (str(uuid_lib.uuid4()), row["id"])
+            )
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"
+        )
     conn.commit()
 
 
@@ -46,6 +116,23 @@ def init_db() -> None:
     conn = get_connection()
     conn.executescript(schema)
     _migrate(conn)
+
+
+def _enqueue_sync_op(conn: sqlite3.Connection, table_name: str, payload: dict) -> None:
+    """Encola una mutación para que `cloud.sync_engine.CloudSyncEngine` la empuje a
+    Supabase. Se llama dentro de la misma transacción que la mutación local (mismo
+    `conn`, sin commit propio acá) para que un cierre inesperado antes del commit
+    no deje la cola desincronizada de lo que realmente se guardó (Fase 1.3)."""
+    conn.execute(
+        "INSERT INTO pending_sync_ops (table_name, payload_json) VALUES (?, ?)",
+        (table_name, json.dumps(payload)),
+    )
+
+
+def _track_ref(track: sqlite3.Row) -> str:
+    """Identidad estable de un track entre dispositivos: 'drive:<drive_file_id>'.
+    Ver `cloud/identity.py` para el lado inverso (resolver esto a un id local)."""
+    return f"drive:{track['drive_file_id']}"
 
 
 # --- Sources -----------------------------------------------------------
@@ -382,9 +469,11 @@ def get_or_create_album(name: str, artist: str | None = None) -> int:
         ).fetchone()
     if row is not None:
         return row["id"]
+    album_uuid = str(uuid_lib.uuid4())
     cursor = conn.execute(
-        "INSERT INTO albums (name, artist) VALUES (?, ?)", (name, artist)
+        "INSERT INTO albums (uuid, name, artist) VALUES (?, ?, ?)", (album_uuid, name, artist)
     )
+    _enqueue_sync_op(conn, "albums", {"uuid": album_uuid, "name": name, "artist": artist})
     conn.commit()
     return cursor.lastrowid
 
@@ -412,12 +501,27 @@ def add_tracks_to_album(album_id: int, track_ids: list[int]) -> int:
     """Agrega canciones a un álbum (ignora las que ya estaban). Devuelve cuántas se sumaron."""
     conn = get_connection()
     added = 0
+    added_track_ids = []
     for track_id in track_ids:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO album_tracks (album_id, track_id) VALUES (?, ?)",
             (album_id, track_id),
         )
-        added += cursor.rowcount
+        if cursor.rowcount:
+            added += 1
+            added_track_ids.append(track_id)
+    if added_track_ids:
+        album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()
+        conn.execute("UPDATE albums SET updated_at = datetime('now') WHERE id = ?", (album_id,))
+        if album_row is not None:
+            for track_id in added_track_ids:
+                track_row = get_track(track_id)
+                if track_row is not None:
+                    _enqueue_sync_op(
+                        conn,
+                        "album_items",
+                        {"album_uuid": album_row["uuid"], "track_ref": _track_ref(track_row)},
+                    )
     conn.commit()
     _backfill_album_art(conn, album_id)
     return added
@@ -428,11 +532,27 @@ def get_album(album_id: int) -> sqlite3.Row | None:
 
 
 def update_album_art(album_id: int, art_path: str) -> None:
+    """Única mutación de `albums` que hasta la Fase 2 no encolaba sync — una
+    carátula buscada en iTunes o subida a mano es la única que de verdad conviene
+    compartir entre dispositivos (ver el plan): la embebida o de carpeta de Drive
+    cualquier dispositivo la deriva sola de su propio escaneo."""
     conn = get_connection()
     conn.execute(
         "UPDATE albums SET art_path = ?, updated_at = datetime('now') WHERE id = ?",
         (art_path, album_id),
     )
+    album_row = conn.execute(
+        "SELECT uuid, name, artist FROM albums WHERE id = ?", (album_id,)
+    ).fetchone()
+    if album_row is not None:
+        _enqueue_sync_op(
+            conn,
+            "albums",
+            {
+                "uuid": album_row["uuid"], "name": album_row["name"], "artist": album_row["artist"],
+                "art_local_path": art_path,
+            },
+        )
     conn.commit()
 
 
@@ -444,8 +564,9 @@ def list_albums() -> list[sqlite3.Row]:
         SELECT a.id AS id, a.name AS album, a.artist AS display_artist, a.art_path AS art_path,
                COUNT(t.id) AS track_count, MAX(t.year) AS year
         FROM albums a
-        JOIN album_tracks atk ON atk.album_id = a.id
+        JOIN album_tracks atk ON atk.album_id = a.id AND atk.deleted_at IS NULL
         JOIN tracks t ON t.id = atk.track_id AND t.cache_status != 'missing'
+        WHERE a.deleted_at IS NULL
         GROUP BY a.id
         HAVING track_count > 0
         ORDER BY display_artist COLLATE NOCASE, year, album
@@ -457,7 +578,7 @@ def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
     return get_connection().execute(
         """
         SELECT t.* FROM tracks t
-        JOIN album_tracks atk ON atk.track_id = t.id
+        JOIN album_tracks atk ON atk.track_id = t.id AND atk.deleted_at IS NULL
         WHERE atk.album_id = ? AND t.cache_status != 'missing'
         ORDER BY t.disc_number, t.track_number, t.title
         """,
@@ -469,9 +590,19 @@ def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
 
 def create_playlist(name: str) -> int:
     conn = get_connection()
-    cursor = conn.execute("INSERT INTO playlists (name) VALUES (?)", (name,))
+    playlist_uuid = str(uuid_lib.uuid4())
+    cursor = conn.execute(
+        "INSERT INTO playlists (uuid, name) VALUES (?, ?)", (playlist_uuid, name)
+    )
+    _enqueue_sync_op(conn, "playlists", {"uuid": playlist_uuid, "name": name})
     conn.commit()
     return cursor.lastrowid
+
+
+def get_playlist(playlist_id: int) -> sqlite3.Row | None:
+    return get_connection().execute(
+        "SELECT * FROM playlists WHERE id = ? AND deleted_at IS NULL", (playlist_id,)
+    ).fetchone()
 
 
 def rename_playlist(playlist_id: int, name: str) -> None:
@@ -480,66 +611,302 @@ def rename_playlist(playlist_id: int, name: str) -> None:
         "UPDATE playlists SET name = ?, updated_at = datetime('now') WHERE id = ?",
         (name, playlist_id),
     )
+    row = conn.execute("SELECT uuid FROM playlists WHERE id = ?", (playlist_id,)).fetchone()
+    if row is not None:
+        _enqueue_sync_op(conn, "playlists", {"uuid": row["uuid"], "name": name})
     conn.commit()
 
 
 def delete_playlist(playlist_id: int) -> None:
+    """Soft-delete: la fila se conserva con `deleted_at` para poder propagar el
+    borrado a los demás dispositivos por sync (Fase 1). La UI (`list_playlists`)
+    ya filtra `deleted_at IS NULL`."""
     conn = get_connection()
-    conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+    row = conn.execute("SELECT uuid FROM playlists WHERE id = ?", (playlist_id,)).fetchone()
+    conn.execute(
+        "UPDATE playlists SET deleted_at = datetime('now'), updated_at = datetime('now') "
+        "WHERE id = ?",
+        (playlist_id,),
+    )
+    if row is not None:
+        _enqueue_sync_op(conn, "playlists", {"uuid": row["uuid"], "deleted": True})
     conn.commit()
 
 
 def list_playlists() -> list[sqlite3.Row]:
-    return get_connection().execute("SELECT * FROM playlists ORDER BY name").fetchall()
-
-
-def list_playlist_tracks(playlist_id: int) -> list[sqlite3.Row]:
     return get_connection().execute(
-        """
-        SELECT tracks.*, playlist_tracks.position AS playlist_position,
-               playlist_tracks.id AS playlist_track_id
-        FROM playlist_tracks
-        JOIN tracks ON tracks.id = playlist_tracks.track_id
-        WHERE playlist_tracks.playlist_id = ?
-        ORDER BY playlist_tracks.position
-        """,
-        (playlist_id,),
+        "SELECT * FROM playlists WHERE deleted_at IS NULL ORDER BY name"
     ).fetchall()
 
 
-def add_track_to_playlist(playlist_id: int, track_id: int) -> None:
+def _track_object_row_from_drive(track_row: sqlite3.Row, playlist_item_id: int, position: int) -> dict:
+    row = dict(track_row)
+    row["source"] = "drive"
+    row["spotify_uri"] = None
+    row["playlist_position"] = position
+    row["playlist_track_id"] = playlist_item_id
+    return row
+
+
+def _track_object_row_from_spotify(spotify_row: sqlite3.Row, playlist_item_id: int, position: int) -> dict:
+    return {
+        "id": f"spotify:{spotify_row['id']}",
+        "drive_file_id": None,
+        "title": spotify_row["title"],
+        "artist": spotify_row["artist"],
+        "album": spotify_row["album"],
+        "duration_seconds": spotify_row["duration_seconds"],
+        "local_path": None,
+        "cache_status": "spotify",
+        "art_path": spotify_row["art_path"],
+        "track_number": None,
+        "source": "spotify",
+        "spotify_uri": spotify_row["uri"],
+        "playlist_position": position,
+        "playlist_track_id": playlist_item_id,
+    }
+
+
+def list_playlist_tracks(playlist_id: int) -> list[dict]:
+    """A diferencia de las demás `list_*`, no es un solo JOIN: `playlist_items.track_ref`
+    puede apuntar a `tracks` (Drive) o `spotify_tracks`, así que cada fila se resuelve acá
+    (ver `_track_object_row_from_drive`/`_track_object_row_from_spotify`). Un item cuyo
+    track no está cacheado localmente todavía (llegó por sync desde otro dispositivo) se
+    omite — limitación conocida, documentada en el plan de la Fase 4."""
+    conn = get_connection()
+    items = conn.execute(
+        "SELECT id, track_ref, position FROM playlist_items "
+        "WHERE playlist_id = ? AND deleted_at IS NULL ORDER BY position",
+        (playlist_id,),
+    ).fetchall()
+    rows: list[dict] = []
+    for item in items:
+        provider, _, external_id = item["track_ref"].partition(":")
+        if provider == "drive":
+            track_row = get_track_by_drive_id(external_id)
+            if track_row is not None:
+                rows.append(_track_object_row_from_drive(track_row, item["id"], item["position"]))
+        elif provider == "spotify":
+            spotify_row = get_spotify_track(external_id)
+            if spotify_row is not None:
+                rows.append(_track_object_row_from_spotify(spotify_row, item["id"], item["position"]))
+    return rows
+
+
+def _add_ref_to_playlist(playlist_id: int, track_ref: str) -> None:
     conn = get_connection()
     row = conn.execute(
-        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM playlist_tracks "
+        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM playlist_items "
         "WHERE playlist_id = ?",
         (playlist_id,),
     ).fetchone()
+    next_pos = row["next_pos"]
     conn.execute(
-        "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)",
-        (playlist_id, track_id, row["next_pos"]),
+        "INSERT INTO playlist_items (playlist_id, track_ref, position) VALUES (?, ?, ?)",
+        (playlist_id, track_ref, next_pos),
+    )
+    playlist_row = conn.execute(
+        "SELECT uuid FROM playlists WHERE id = ?", (playlist_id,)
+    ).fetchone()
+    if playlist_row is not None:
+        conn.execute(
+            "UPDATE playlists SET updated_at = datetime('now') WHERE id = ?", (playlist_id,)
+        )
+        _enqueue_sync_op(
+            conn,
+            "playlist_items",
+            {"playlist_uuid": playlist_row["uuid"], "track_ref": track_ref, "position": next_pos},
+        )
+    conn.commit()
+
+
+def add_track_to_playlist(playlist_id: int, track_id: int) -> None:
+    track_row = get_track(track_id)
+    if track_row is not None:
+        _add_ref_to_playlist(playlist_id, _track_ref(track_row))
+
+
+def add_spotify_track_to_playlist(playlist_id: int, spotify_track_id: str) -> None:
+    _add_ref_to_playlist(playlist_id, f"spotify:{spotify_track_id}")
+
+
+def remove_playlist_item(playlist_item_id: int) -> None:
+    """Soft-delete: igual que `delete_playlist`, para poder propagar la quita a
+    los demás dispositivos (Fase 1). El índice único de posición es parcial
+    (`WHERE deleted_at IS NULL`, ver schema.sql) así que esto no bloquea que un
+    reorder posterior reutilice esa misma posición numérica."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT pi.playlist_id AS playlist_id, p.uuid AS playlist_uuid, pi.track_ref AS track_ref "
+        "FROM playlist_items pi JOIN playlists p ON p.id = pi.playlist_id WHERE pi.id = ?",
+        (playlist_item_id,),
+    ).fetchone()
+    conn.execute(
+        "UPDATE playlist_items SET deleted_at = datetime('now'), updated_at = datetime('now') "
+        "WHERE id = ?",
+        (playlist_item_id,),
+    )
+    if row is not None:
+        conn.execute(
+            "UPDATE playlists SET updated_at = datetime('now') WHERE id = ?",
+            (row["playlist_id"],),
+        )
+        _enqueue_sync_op(
+            conn,
+            "playlist_items",
+            {
+                "playlist_uuid": row["playlist_uuid"],
+                "track_ref": row["track_ref"],
+                "deleted": True,
+            },
+        )
+    conn.commit()
+
+
+def reorder_playlist_items(playlist_id: int, playlist_item_ids_in_order: list[int]) -> None:
+    conn = get_connection()
+    # Desplazar a posiciones negativas temporales para esquivar el UNIQUE(playlist_id, position).
+    for offset, playlist_item_id in enumerate(playlist_item_ids_in_order):
+        conn.execute(
+            "UPDATE playlist_items SET position = ? WHERE id = ? AND playlist_id = ?",
+            (-(offset + 1), playlist_item_id, playlist_id),
+        )
+    for position, playlist_item_id in enumerate(playlist_item_ids_in_order):
+        conn.execute(
+            "UPDATE playlist_items SET position = ?, updated_at = datetime('now') "
+            "WHERE id = ? AND playlist_id = ?",
+            (position, playlist_item_id, playlist_id),
+        )
+    playlist_row = conn.execute(
+        "SELECT uuid FROM playlists WHERE id = ?", (playlist_id,)
+    ).fetchone()
+    if playlist_row is not None:
+        conn.execute(
+            "UPDATE playlists SET updated_at = datetime('now') WHERE id = ?", (playlist_id,)
+        )
+        rows = conn.execute(
+            "SELECT position, track_ref FROM playlist_items "
+            "WHERE playlist_id = ? AND deleted_at IS NULL",
+            (playlist_id,),
+        ).fetchall()
+        for item in rows:
+            _enqueue_sync_op(
+                conn,
+                "playlist_items",
+                {
+                    "playlist_uuid": playlist_row["uuid"],
+                    "track_ref": item["track_ref"],
+                    "position": item["position"],
+                },
+            )
+    conn.commit()
+
+
+# --- Spotify (cache local de metadata — Purrr no decodifica su audio) --------
+
+def cache_spotify_track(
+    spotify_id: str,
+    title: str,
+    artist: str | None,
+    album: str | None,
+    duration_seconds: float | None,
+    art_url: str | None,
+    art_path: str | None,
+    uri: str,
+) -> None:
+    conn = get_connection()
+    conn.execute(
+        """
+        INSERT INTO spotify_tracks (id, title, artist, album, duration_seconds, art_url, art_path, uri)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title, artist = excluded.artist, album = excluded.album,
+            duration_seconds = excluded.duration_seconds, art_url = excluded.art_url,
+            art_path = COALESCE(excluded.art_path, spotify_tracks.art_path)
+        """,
+        (spotify_id, title, artist, album, duration_seconds, art_url, art_path, uri),
     )
     conn.commit()
 
 
-def remove_playlist_track(playlist_track_id: int) -> None:
+def get_spotify_track(spotify_id: str) -> sqlite3.Row | None:
+    return get_connection().execute(
+        "SELECT * FROM spotify_tracks WHERE id = ?", (spotify_id,)
+    ).fetchone()
+
+
+# --- Ánimo (Fase 5 — solo tracks de Drive, ver mood/) ------------------------
+
+def save_track_mood(
+    track_id: int, happy: float, sad: float, relaxed: float, aggressive: float
+) -> None:
     conn = get_connection()
-    conn.execute("DELETE FROM playlist_tracks WHERE id = ?", (playlist_track_id,))
+    conn.execute(
+        """
+        INSERT INTO track_mood (track_id, happy, sad, relaxed, aggressive)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            happy = excluded.happy, sad = excluded.sad, relaxed = excluded.relaxed,
+            aggressive = excluded.aggressive, updated_at = datetime('now')
+        """,
+        (track_id, happy, sad, relaxed, aggressive),
+    )
+    track_row = get_track(track_id)
+    if track_row is not None:
+        _enqueue_sync_op(
+            conn,
+            "track_moods",
+            {
+                "track_ref": _track_ref(track_row),
+                "happy": happy, "sad": sad, "relaxed": relaxed, "aggressive": aggressive,
+            },
+        )
     conn.commit()
 
 
-def reorder_playlist_tracks(playlist_id: int, playlist_track_ids_in_order: list[int]) -> None:
+def get_track_mood(track_id: int) -> sqlite3.Row | None:
+    return get_connection().execute(
+        "SELECT * FROM track_mood WHERE track_id = ?", (track_id,)
+    ).fetchone()
+
+
+def list_tracks_needing_mood_analysis() -> list[sqlite3.Row]:
+    """Tracks de Drive ya cacheados (hay archivo local para analizar) que todavía no
+    tienen un vector de ánimo — candidatos para `mood.controller.analyze_library`."""
+    return get_connection().execute(
+        """
+        SELECT t.* FROM tracks t
+        LEFT JOIN track_mood tm ON tm.track_id = t.id
+        WHERE t.cache_status = 'cached' AND t.local_path IS NOT NULL AND tm.track_id IS NULL
+        ORDER BY t.artist, t.album, t.track_number
+        """
+    ).fetchall()
+
+
+def list_track_moods() -> list[sqlite3.Row]:
+    """Todos los vectores de ánimo ya calculados, con los datos de su track — para
+    rankear candidatos en `mood.queue_builder.build_mood_queue`."""
+    return get_connection().execute(
+        """
+        SELECT t.*, tm.happy, tm.sad, tm.relaxed, tm.aggressive
+        FROM track_mood tm
+        JOIN tracks t ON t.id = tm.track_id
+        WHERE t.cache_status != 'missing'
+        """
+    ).fetchall()
+
+
+# --- Cola de sync (cloud/sync_engine.py) --------------------------------
+
+def list_pending_sync_ops(limit: int = 100) -> list[sqlite3.Row]:
+    return get_connection().execute(
+        "SELECT * FROM pending_sync_ops ORDER BY id LIMIT ?", (limit,)
+    ).fetchall()
+
+
+def delete_pending_sync_op(op_id: int) -> None:
     conn = get_connection()
-    # Desplazar a posiciones negativas temporales para esquivar el UNIQUE(playlist_id, position).
-    for offset, playlist_track_id in enumerate(playlist_track_ids_in_order):
-        conn.execute(
-            "UPDATE playlist_tracks SET position = ? WHERE id = ? AND playlist_id = ?",
-            (-(offset + 1), playlist_track_id, playlist_id),
-        )
-    for position, playlist_track_id in enumerate(playlist_track_ids_in_order):
-        conn.execute(
-            "UPDATE playlist_tracks SET position = ? WHERE id = ? AND playlist_id = ?",
-            (position, playlist_track_id, playlist_id),
-        )
+    conn.execute("DELETE FROM pending_sync_ops WHERE id = ?", (op_id,))
     conn.commit()
 
 

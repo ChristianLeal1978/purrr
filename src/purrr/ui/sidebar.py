@@ -9,6 +9,10 @@ _LIBRARY_ROW = "library"
 _FOLDERS_ROW = "folders"
 _ALBUMS_ROW = "albums"
 _SOURCES_ROW = "sources"
+_RADIOS_ROW = "radios"
+_SPOTIFY_ROW = "spotify"
+_MOOD_ROW = "mood"
+_CLOUD_ROW = "cloud"
 _NEW_PLAYLIST_ROW = "new-playlist"
 
 
@@ -18,6 +22,10 @@ class Sidebar(Gtk.Box):
         "folders-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "albums-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sources-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "radios-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "spotify-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "mood-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "cloud-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "playlist-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "new-playlist-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
@@ -40,6 +48,18 @@ class Sidebar(Gtk.Box):
 
         self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
         self._list_box.append(self._sources_row)
+
+        self._radios_row = self._make_row("Radios", "network-wireless-signal-excellent-symbolic")
+        self._list_box.append(self._radios_row)
+
+        self._spotify_row = self._make_row("Spotify", "audio-headphones-symbolic")
+        self._list_box.append(self._spotify_row)
+
+        self._mood_row = self._make_row("Ánimo", "face-smile-symbolic")
+        self._list_box.append(self._mood_row)
+
+        self._cloud_row = self._make_row("Cuenta / Sync", "network-server-symbolic")
+        self._list_box.append(self._cloud_row)
 
         header = Gtk.ListBoxRow(selectable=False, activatable=False)
         header_label = Gtk.Label(label="Playlists", halign=Gtk.Align.START, margin_top=12)
@@ -67,6 +87,18 @@ class Sidebar(Gtk.Box):
 
     def select_sources_row(self) -> None:
         self._list_box.select_row(self._sources_row)
+
+    def select_radios_row(self) -> None:
+        self._list_box.select_row(self._radios_row)
+
+    def select_spotify_row(self) -> None:
+        self._list_box.select_row(self._spotify_row)
+
+    def select_mood_row(self) -> None:
+        self._list_box.select_row(self._mood_row)
+
+    def select_cloud_row(self) -> None:
+        self._list_box.select_row(self._cloud_row)
 
     def select_playlist_row(self, playlist_id: int) -> None:
         for row, pid in self._playlist_row_ids.items():
@@ -110,6 +142,14 @@ class Sidebar(Gtk.Box):
             self.emit("albums-selected")
         elif row is self._sources_row:
             self.emit("sources-selected")
+        elif row is self._radios_row:
+            self.emit("radios-selected")
+        elif row is self._spotify_row:
+            self.emit("spotify-selected")
+        elif row is self._mood_row:
+            self.emit("mood-selected")
+        elif row is self._cloud_row:
+            self.emit("cloud-selected")
         elif row is self._new_playlist_row:
             self.emit("new-playlist-requested")
         elif row in self._playlist_row_ids:

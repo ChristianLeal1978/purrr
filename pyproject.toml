@@ -13,6 +13,10 @@ dependencies = [
     "google-auth-oauthlib>=1.4",
     "google-api-python-client",
     "google-auth-httplib2",
+    "supabase>=2.31",
+    "cryptography",
+    "spotipy>=2.26",
+    "essentia-tensorflow",
 ]
 
 [project.scripts]
@@ -22,4 +26,4 @@ purrr = "purrr.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-purrr = ["db/schema.sql", "ui/style.css"]
+purrr = ["db/schema.sql", "ui/style.css", "cloud/schema.sql"]

@@ -37,6 +37,15 @@ def save_album_art_bytes(data: bytes, album_id: int, ext: str = ".jpg") -> Path:
     return path
 
 
+def save_spotify_art_bytes(data: bytes, spotify_track_id: str, ext: str = ".jpg") -> Path:
+    """Igual que `save_album_art_bytes`, pero para la miniatura de un track de Spotify
+    agregado a una playlist mixta (ver purrr.spotify.client)."""
+    path = ALBUM_ART_CACHE_DIR / f"spotify-{spotify_track_id}{ext}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
 def fetch_bytes(service: Resource, file_id: str) -> bytes:
     """Descarga un archivo completo de una sola vez (para archivos chicos, como carátulas)."""
     return service.files().get_media(fileId=file_id).execute(num_retries=3)

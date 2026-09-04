@@ -7,7 +7,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
+from purrr.db import database
 from purrr.ui.context_menu import show_context_menu
+from purrr.ui.playlist_picker import open_playlist_picker
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -18,15 +20,17 @@ def _format_duration(seconds: float | None) -> str:
 
 
 class TrackObject(GObject.Object):
-    """Envoltorio GObject de una fila de `tracks` para usar en un Gio.ListStore."""
+    """Envoltorio GObject de una fila de `tracks` (o, desde una playlist mixta, de un
+    dict ya normalizado por `database.list_playlist_tracks` — mismas claves, mapping
+    con `row["clave"]` en ambos casos) para usar en un Gio.ListStore."""
 
     playing = GObject.Property(type=bool, default=False)
 
-    def __init__(self, row: sqlite3.Row):
+    def __init__(self, row: sqlite3.Row | dict):
         super().__init__()
-        self.track_id: int = row["id"]
-        self.drive_file_id: str = row["drive_file_id"]
-        self.title: str = row["title"] or row["file_name"]
+        self.track_id: int | str = row["id"]
+        self.drive_file_id: str | None = row["drive_file_id"]
+        self.title: str = row["title"] or (row["file_name"] if "file_name" in row.keys() else "")
         self.artist: str = row["artist"] or ""
         self.album: str = row["album"] or ""
         self.duration_str: str = _format_duration(row["duration_seconds"])
@@ -40,6 +44,11 @@ class TrackObject(GObject.Object):
         self.track_number_sort: int = (
             row["track_number"] if row["track_number"] is not None else 1_000_000
         )
+        # Fase 4 — playlists mixtas: 'drive' (default, biblioteca/carpetas/álbumes,
+        # siempre) o 'spotify' (solo posible viniendo de una playlist). Ver
+        # ui/playback_bar.py:play_queue_item para el despacho por proveedor.
+        self.source: str = row["source"] if "source" in row.keys() else "drive"
+        self.spotify_uri: str | None = row["spotify_uri"] if "spotify_uri" in row.keys() else None
 
 
 def apply_now_playing(store: Gio.ListStore, track_id: int | None) -> None:
@@ -227,5 +236,18 @@ class LibraryView(Gtk.Box):
             track_ids = [track.track_id]
 
         show_context_menu(
-            widget, x, y, [("Agregar a álbumes", lambda: self.emit("add-to-album-requested", track_ids))]
+            widget,
+            x,
+            y,
+            [
+                ("Agregar a álbumes", lambda: self.emit("add-to-album-requested", track_ids)),
+                ("Agregar a playlist…", lambda: self._add_to_playlist(track_ids)),
+            ],
         )
+
+    def _add_to_playlist(self, track_ids: list[int]) -> None:
+        def on_chosen(playlist_id: int) -> None:
+            for track_id in track_ids:
+                database.add_track_to_playlist(playlist_id, track_id)
+
+        open_playlist_picker(self.get_root(), on_chosen)

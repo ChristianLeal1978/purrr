@@ -12,6 +12,8 @@ class QueueItem:
     local_path: str | None
     duration_seconds: float
     art_path: str | None = None
+    source: str = "drive"  # 'drive' | 'spotify' — ver ui/playback_bar.py:play_queue_item
+    spotify_uri: str | None = None
 
 
 class PlayQueue:

@@ -8,27 +8,42 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from purrr.auth.oauth import get_credentials
+from purrr.auth import spotify_oauth
+from purrr.auth.oauth import get_credentials, is_authenticated
 from purrr.cache.manager import save_album_art_bytes
+from purrr.cloud import client as cloud_client
+from purrr.cloud import vault as cloud_vault
+from purrr.cloud.sync_engine import CloudSyncEngine
 from purrr.db import database
 from purrr.drive.client import get_service
 from purrr.metadata import cover_search
 from purrr.metadata.cover_search import CoverCandidate
+from purrr.mood.controller import MoodAnalysisController
+from purrr.mood.queue_builder import build_mood_queue
 from purrr.mpris.service import MprisService
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
+from purrr.player.sources import radiotunes as radiotunes_source
+from purrr.player.station import Station
+from purrr.spotify import client as spotify_client
+from purrr.spotify.track import SpotifyTrack
 from purrr.sync.controller import SyncController
 from purrr.ui.album_dialogs import open_cover_approval_dialog
 from purrr.ui.albums_view import AlbumsView
+from purrr.ui.cloud_settings import CloudSettingsView
 from purrr.ui.dialogs import prompt_text
 from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
 from purrr.ui.folder_view import FolderBrowserView
 from purrr.ui.library_view import LibraryView
 from purrr.ui.library_view import TrackObject as LibraryTrackObject
+from purrr.ui.mood_view import MoodView
 from purrr.ui.playback_bar import PlaybackBar
+from purrr.ui.playlist_picker import open_playlist_picker
 from purrr.ui.playlist_view import PlaylistView
 from purrr.ui.sidebar import Sidebar
+from purrr.ui.spotify_view import SpotifyView
+from purrr.ui.stations_view import StationsView
 
 
 def _folder_name(folder_path: str | None) -> str | None:
@@ -48,6 +63,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._engine = PlayerEngine()
         self._queue = PlayQueue()
         self._sync_controller = SyncController()
+        self._cloud_sync_engine = CloudSyncEngine()
+        self._mood_controller = MoodAnalysisController()
         self._current_playlist_id: int | None = None
         self._current_search_text: str | None = None
         self._track_updated_source_id: int | None = None
@@ -58,6 +75,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view = AlbumsView()
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
+        self._stations_view = StationsView()
+        self._spotify_view = SpotifyView()
+        self._mood_view = MoodView()
+        self._cloud_settings_view = CloudSettingsView()
         self._playback_bar = PlaybackBar(self._engine, self._queue, self._sync_controller)
         self._mpris_service = MprisService(self._engine, self._queue, self._playback_bar)
 
@@ -65,16 +86,29 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._build_layout()
         self._reload_all()
         self._restore_last_view()
+        self._refresh_cloud_settings_view()
+        self._cloud_sync_engine.start()
 
     # --- Construcción de la UI --------------------------------------------
 
     def _build_layout(self) -> None:
         self._content_stack = Gtk.Stack()
+        # Por defecto Gtk.Stack dimensiona su alto/ancho según la página MÁS GRANDE de
+        # todas, no solo la visible — así que una sola pantalla con contenido sin acotar
+        # (ver stations_view.py) forzaba a la ventana entera a ese tamaño sin importar
+        # qué pantalla estuviera mirando el usuario, incluso más grande que su propia
+        # pantalla física.
+        self._content_stack.set_hhomogeneous(False)
+        self._content_stack.set_vhomogeneous(False)
         self._content_stack.add_named(self._library_view, "library")
         self._content_stack.add_named(self._folder_view, "folders")
         self._content_stack.add_named(self._albums_view, "albums")
         self._content_stack.add_named(self._playlist_view, "playlist")
         self._content_stack.add_named(self._sources_view, "sources")
+        self._content_stack.add_named(self._stations_view, "radios")
+        self._content_stack.add_named(self._spotify_view, "spotify")
+        self._content_stack.add_named(self._mood_view, "mood")
+        self._content_stack.add_named(self._cloud_settings_view, "cloud")
 
         sidebar_page = Adw.NavigationPage(child=self._sidebar, title="Purrr")
         content_page = Adw.NavigationPage(child=self._content_stack, title="Biblioteca")
@@ -86,8 +120,8 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
+        toolbar_view.add_top_bar(self._playback_bar)
         toolbar_view.set_content(split_view)
-        toolbar_view.add_bottom_bar(self._playback_bar)
 
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(toolbar_view)
@@ -98,6 +132,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sidebar.connect("folders-selected", self._on_folders_selected)
         self._sidebar.connect("albums-selected", self._on_albums_selected)
         self._sidebar.connect("sources-selected", self._on_sources_selected)
+        self._sidebar.connect("radios-selected", self._on_radios_selected)
+        self._sidebar.connect("spotify-selected", self._on_spotify_selected)
+        self._sidebar.connect("mood-selected", self._on_mood_selected)
+        self._sidebar.connect("cloud-selected", self._on_cloud_selected)
         self._sidebar.connect("playlist-selected", self._on_playlist_selected)
         self._sidebar.connect("new-playlist-requested", self._on_new_playlist_requested)
 
@@ -125,6 +163,34 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.connect("rescan-requested", self._on_rescan_requested)
         self._sources_view.connect("metadata-scan-requested", self._on_metadata_scan_requested)
         self._sources_view.connect("delete-source-requested", self._on_delete_source_requested)
+
+        self._stations_view.connect("station-activated", self._on_station_activated)
+        self._stations_view.connect(
+            "radiotunes-key-save-requested", self._on_radiotunes_key_save_requested
+        )
+
+        self._spotify_view.connect("client-id-save-requested", self._on_spotify_client_id_save_requested)
+        self._spotify_view.connect("connect-requested", self._on_spotify_connect_requested)
+        self._spotify_view.connect("search-requested", self._on_spotify_search_requested)
+        self._spotify_view.connect("play-requested", self._on_spotify_play_requested)
+        self._spotify_view.connect("add-to-playlist-requested", self._on_spotify_add_to_playlist_requested)
+
+        self._mood_view.connect("analyze-library-requested", self._on_analyze_library_requested)
+        self._mood_view.connect("search-requested", self._on_mood_search_requested)
+        self._mood_view.connect("play-mood-requested", self._on_play_mood_requested)
+
+        self._mood_controller.connect("models-download-progress", self._on_mood_models_download_progress)
+        self._mood_controller.connect("analysis-progress", self._on_mood_analysis_progress)
+        self._mood_controller.connect("analysis-finished", self._on_mood_analysis_finished)
+        self._mood_controller.connect("error", self._on_mood_error)
+
+        self._cloud_settings_view.connect("sign-in-requested", self._on_sign_in_requested)
+        self._cloud_settings_view.connect("sign-up-requested", self._on_sign_up_requested)
+        self._cloud_settings_view.connect("sign-out-requested", self._on_sign_out_requested)
+
+        self._cloud_sync_engine.connect("playlists-changed", self._on_cloud_playlists_changed)
+        self._cloud_sync_engine.connect("albums-changed", self._on_cloud_albums_changed)
+        self._cloud_sync_engine.connect("sync-error", self._on_cloud_sync_error)
 
         self._sync_controller.connect("progress", self._on_sync_progress)
         self._sync_controller.connect("finished", self._on_sync_finished)
@@ -159,6 +225,18 @@ class PurrrWindow(Adw.ApplicationWindow):
         elif last_view == "sources":
             self._on_sources_selected(self._sidebar)
             self._sidebar.select_sources_row()
+        elif last_view == "radios":
+            self._on_radios_selected(self._sidebar)
+            self._sidebar.select_radios_row()
+        elif last_view == "spotify":
+            self._on_spotify_selected(self._sidebar)
+            self._sidebar.select_spotify_row()
+        elif last_view == "mood":
+            self._on_mood_selected(self._sidebar)
+            self._sidebar.select_mood_row()
+        elif last_view == "cloud":
+            self._on_cloud_selected(self._sidebar)
+            self._sidebar.select_cloud_row()
         elif last_view.startswith("playlist:"):
             playlist_id = int(last_view.split(":", 1)[1])
             if any(p["id"] == playlist_id for p in database.list_playlists()):
@@ -191,6 +269,28 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._content_stack.set_visible_child_name("sources")
         self._sources_view.refresh_sources(database.list_sources())
         database.set_state("last_view", "sources")
+
+    def _on_radios_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Radios")
+        self._content_stack.set_visible_child_name("radios")
+        database.set_state("last_view", "radios")
+        self._refresh_radiotunes_view()
+
+    def _on_spotify_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Spotify")
+        self._content_stack.set_visible_child_name("spotify")
+        database.set_state("last_view", "spotify")
+        self._refresh_spotify_view()
+
+    def _on_mood_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Ánimo")
+        self._content_stack.set_visible_child_name("mood")
+        database.set_state("last_view", "mood")
+
+    def _on_cloud_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Cuenta / Sync")
+        self._content_stack.set_visible_child_name("cloud")
+        database.set_state("last_view", "cloud")
 
     def _on_playlist_selected(self, _sidebar, playlist_id: int) -> None:
         playlist_row = next(
@@ -231,6 +331,31 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _on_folder_scan_requested(self, _view, source_id: int, folder_path: str) -> None:
         self._sync_controller.start_metadata_scan(source_id, folder_path)
+
+    def _on_station_activated(self, _view, station: Station) -> None:
+        self._playback_bar.play_station(station)
+
+    def _on_radiotunes_key_save_requested(self, _view, key: str) -> None:
+        radiotunes_source.save_listen_key(key)
+        self._stations_view.set_radiotunes_configured(True)
+        self._refresh_radiotunes_view()
+
+    def _refresh_radiotunes_view(self) -> None:
+        configured = radiotunes_source.is_configured()
+        self._stations_view.set_radiotunes_configured(configured)
+        if not configured:
+            return
+        self._stations_view.show_radiotunes_loading()
+
+        def worker() -> None:
+            try:
+                stations = radiotunes_source.list_stations()
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo cargar el catálogo de RadioTunes: {exc}")
+                stations = []
+            GLib.idle_add(self._stations_view.show_radiotunes_channels, stations)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_album_activated(self, _view, album_id: int) -> None:
         tracks = [LibraryTrackObject(row) for row in database.list_album_tracks(album_id)]
@@ -418,12 +543,18 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._library_view.set_now_playing(item.track_id)
         self._folder_view.set_now_playing(item.track_id)
         self._playlist_view.set_now_playing(item.track_id)
+        # Fase 5: cada canción de Drive que se reproduce (aunque sea sin pasar por la
+        # pantalla "Ánimo" para nada) suma cobertura de análisis de a poco — así no
+        # hace falta correr "Analizar biblioteca" para que el modo Ánimo empiece a
+        # tener candidatos.
+        if item.source == "drive" and item.local_path:
+            self._mood_controller.ensure_mood(item.track_id, item.local_path, lambda _vector: None)
 
     # --- Playlists -------------------------------------------------------
 
     def _on_remove_tracks_requested(self, _view, playlist_track_ids) -> None:
         for playlist_track_id in playlist_track_ids:
-            database.remove_playlist_track(playlist_track_id)
+            database.remove_playlist_item(playlist_track_id)
         self._on_playlist_selected(self._sidebar, self._current_playlist_id)
 
     def _on_playlist_rename_requested(self, _view, name: str) -> None:
@@ -536,3 +667,187 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _on_playback_error(self, _bar, message: str) -> None:
         self._toast(f"Error de reproducción: {message}")
+
+    # --- Cuenta / Sync (Fase 1) --------------------------------------------
+
+    def _refresh_cloud_settings_view(self) -> None:
+        logged_in = cloud_client.is_logged_in_locally()
+        email = None
+        if logged_in:
+            try:
+                session = cloud_client.get_client().auth.get_session()
+                email = session.user.email if session else None
+            except Exception:  # noqa: BLE001 — sesión guardada corrupta/expirada
+                logged_in = False
+        self._cloud_settings_view.set_logged_in(logged_in, email)
+
+    def _on_sign_in_requested(self, _view, email: str, password: str) -> None:
+        self._do_cloud_auth(cloud_client.sign_in, email, password)
+
+    def _on_sign_up_requested(self, _view, email: str, password: str) -> None:
+        self._do_cloud_auth(cloud_client.sign_up, email, password)
+
+    def _do_cloud_auth(self, action, email: str, password: str) -> None:
+        def worker() -> None:
+            try:
+                action(email, password)
+                # La bóveda se desbloquea con la MISMA contraseña recién ingresada (nunca
+                # viaja a Supabase, ver cloud/vault.py) y trae Drive/etc. ya conectados.
+                cloud_vault.sync_after_login(password, email)
+                GLib.idle_add(self._on_cloud_signed_in)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo iniciar sesión: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cloud_signed_in(self) -> bool:
+        self._refresh_cloud_settings_view()
+        self._sources_view.set_authenticated(is_authenticated())
+        self._cloud_sync_engine.start()
+        self._toast("Sesión iniciada — sincronizando.")
+        return False
+
+    def _on_sign_out_requested(self, _view) -> None:
+        self._cloud_sync_engine.stop()
+        cloud_client.sign_out()
+        cloud_vault.lock()
+        self._refresh_cloud_settings_view()
+
+    def _on_cloud_playlists_changed(self, _engine) -> None:
+        self._sidebar.refresh_playlists(database.list_playlists())
+        if self._current_playlist_id is not None:
+            self._on_playlist_selected(self._sidebar, self._current_playlist_id)
+
+    def _on_cloud_albums_changed(self, _engine) -> None:
+        self._albums_view.refresh(database.list_albums())
+
+    def _on_cloud_sync_error(self, _engine, message: str) -> None:
+        self._cloud_settings_view.log_event(message)
+
+    # --- Spotify (Fase 4) --------------------------------------------------
+
+    def _refresh_spotify_view(self) -> None:
+        configured = spotify_oauth.is_client_configured()
+        self._spotify_view.set_client_configured(configured)
+        authenticated = configured and spotify_oauth.is_authenticated()
+        self._spotify_view.set_authenticated(authenticated)
+        if authenticated:
+            self._refresh_spotify_devices()
+
+    def _refresh_spotify_devices(self) -> None:
+        def worker() -> None:
+            try:
+                devices = spotify_client.list_devices()
+            except Exception:
+                devices = []
+            GLib.idle_add(self._spotify_view.show_devices, devices)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_spotify_client_id_save_requested(self, _view, client_id: str) -> None:
+        spotify_oauth.save_client_id(client_id)
+        self._refresh_spotify_view()
+
+    def _on_spotify_connect_requested(self, _view) -> None:
+        def worker() -> None:
+            try:
+                spotify_oauth.run_oauth_flow()
+                GLib.idle_add(self._on_spotify_connected_success)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo conectar Spotify: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_spotify_connected_success(self) -> bool:
+        self._refresh_spotify_view()
+        self._toast("Cuenta de Spotify conectada.")
+        return False
+
+    def _on_spotify_search_requested(self, _view, query: str) -> None:
+        if not query.strip():
+            return
+
+        def worker() -> None:
+            try:
+                results = spotify_client.search_tracks(query)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo buscar en Spotify: {exc}")
+                return
+            GLib.idle_add(self._spotify_view.show_results, results)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_spotify_play_requested(self, _view, track: SpotifyTrack) -> None:
+        self._playback_bar.play_spotify_track(track)
+
+    def _on_spotify_add_to_playlist_requested(self, _view, track: SpotifyTrack) -> None:
+        def worker() -> None:
+            try:
+                spotify_client.cache_spotify_track(track)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                GLib.idle_add(self._toast, f"No se pudo agregar la canción: {exc}")
+                return
+            GLib.idle_add(self._open_spotify_playlist_picker, track)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_spotify_playlist_picker(self, track: SpotifyTrack) -> bool:
+        def on_chosen(playlist_id: int) -> None:
+            database.add_spotify_track_to_playlist(playlist_id, track.id)
+            self._toast(f'"{track.title}" agregada a la playlist.')
+
+        open_playlist_picker(self, on_chosen)
+        return False
+
+    # --- Ánimo (Fase 5) --------------------------------------------------
+
+    def _on_analyze_library_requested(self, _view) -> None:
+        self._mood_controller.analyze_library()
+
+    def _on_mood_search_requested(self, _view, query: str) -> None:
+        query = query.strip()
+        self._mood_view.show_search_results(database.list_tracks(filter_text=query) if query else [])
+
+    def _on_mood_models_download_progress(self, _controller, done: int, total: int) -> None:
+        self._mood_view.show_models_download_progress(done, total)
+
+    def _on_mood_analysis_progress(self, _controller, analyzed: int, total: int) -> None:
+        self._mood_view.show_analysis_progress(analyzed, total)
+
+    def _on_mood_analysis_finished(self, _controller, analyzed: int) -> None:
+        self._mood_view.show_analysis_finished(analyzed)
+
+    def _on_mood_error(self, _controller, message: str) -> None:
+        self._toast(f"Error en el análisis de ánimo: {message}")
+
+    def _on_play_mood_requested(self, _view, seed_ids) -> None:
+        seed_ids = list(seed_ids)
+        if seed_ids:
+            self._ensure_mood_seeds_analyzed(seed_ids, seed_ids)
+
+    def _ensure_mood_seeds_analyzed(self, to_check: list[int], all_seed_ids: list[int]) -> None:
+        """Una semilla elegida que todavía no tiene vector de ánimo se analiza al
+        toque acá — no hace falta correr "Analizar biblioteca" antes para poder
+        probar el modo con un puñado de canciones."""
+        for index, track_id in enumerate(to_check):
+            if database.get_track_mood(track_id) is None:
+                track = database.get_track(track_id)
+                if track is not None and track["local_path"]:
+                    self._toast("Analizando canción semilla…")
+                    self._mood_controller.ensure_mood(
+                        track_id,
+                        track["local_path"],
+                        lambda _vector, rest=to_check[index + 1 :]: self._ensure_mood_seeds_analyzed(
+                            rest, all_seed_ids
+                        ),
+                    )
+                    return
+        self._play_mood_queue(all_seed_ids)
+
+    def _play_mood_queue(self, seed_ids: list[int]) -> None:
+        items = build_mood_queue(seed_ids)
+        if not items:
+            self._toast("No hay suficientes canciones analizadas para armar la cola.")
+            return
+        self._queue.set_queue(items, 0)
+        self._playback_bar.play_queue_item(items[0])

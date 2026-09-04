@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Firma de release — nunca versionar (perder esto rompe futuras actualizaciones
+# en Play Console; que se filtre permite firmar builds maliciosos como si fueran
+# de esta app).
+keystore.properties
+*.keystore
+*.jks

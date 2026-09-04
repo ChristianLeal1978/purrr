@@ -47,7 +47,7 @@ def open_cover_approval_dialog(
         return
 
     content.append(
-        Gtk.Label(label="Elegí la carátula correcta para guardarla localmente:", wrap=True, halign=Gtk.Align.START)
+        Gtk.Label(label="Elige la carátula correcta para guardarla localmente:", wrap=True, halign=Gtk.Align.START)
     )
 
     flow = Gtk.FlowBox(

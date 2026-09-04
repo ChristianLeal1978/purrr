@@ -16,13 +16,19 @@ def ensure_gst_init() -> None:
 
 
 class PlayerEngine(GObject.Object):
-    """Envuelve un playbin de GStreamer para reproducir archivos locales cacheados."""
+    """Envuelve un playbin de GStreamer para reproducir archivos locales cacheados o
+    streams en vivo por URI (ver `load()`)."""
 
     __gsignals__ = {
         "state-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "position-updated": (GObject.SignalFlags.RUN_FIRST, None, (float, float)),
         "eos": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Metadata ICY de un stream de radio en vivo (Shoutcast/Icecast) — playbin la
+        # expone como un tag GST_TAG_TITLE normal, sin distinguirla de un tag de archivo
+        # local; quien escuche esta señal decide si le importa (ver playback_bar.py,
+        # solo la usa en modo 'station').
+        "tags-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self):
@@ -38,9 +44,11 @@ class PlayerEngine(GObject.Object):
 
         self._position_source_id: int | None = None
 
-    def load(self, local_path: Path) -> None:
+    def load(self, source: Path | str) -> None:
+        """`source` es un `Path` local (se convierte a `file://`) o ya una URI
+        (`http(s)://`, para estaciones de radio en vivo — ver `player/station.py`)."""
         self.stop()
-        uri = GLib.filename_to_uri(str(local_path))
+        uri = GLib.filename_to_uri(str(source)) if isinstance(source, Path) else source
         self._playbin.set_property("uri", uri)
 
     def play(self) -> None:
@@ -101,3 +109,8 @@ class PlayerEngine(GObject.Object):
             if message.src == self._playbin:
                 _old, new, _pending = message.parse_state_changed()
                 self.emit("state-changed", new.value_nick)
+        elif message.type == Gst.MessageType.TAG:
+            taglist = message.parse_tag()
+            ok, title = taglist.get_string(Gst.TAG_TITLE)
+            if ok and title:
+                self.emit("tags-changed", title)

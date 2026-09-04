@@ -1,13 +1,18 @@
+import threading
 from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import GObject, Gtk, Pango
+from gi.repository import GLib, GObject, Gtk, Pango
 
+from purrr.player import pls_resolver
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
+from purrr.player.spotify_connect import SpotifyConnectController
+from purrr.player.station import Station
+from purrr.spotify.track import SpotifyTrack
 from purrr.sync.controller import SyncController
 from purrr.ui.textures import load_texture_at_size
 from purrr.ui.waveform_scrubber import WaveformScrubber
@@ -36,10 +41,20 @@ class PlaybackBar(Gtk.Box):
         self._current_duration = 1.0
         self._waveform_token: int | None = None
         self._art_token: int | None = None
+        self._playback_mode = "local"  # 'local' | 'station' | 'spotify'
+        self._station_resolve_token: Station | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
         self.engine.connect("error", self._on_error)
+        self.engine.connect("tags-changed", self._on_tags_changed)
+        self._current_station: Station | None = None
+
+        self._spotify_controller = SpotifyConnectController()
+        self._spotify_controller.connect("position-updated", self._on_spotify_position_updated)
+        self._spotify_controller.connect("ended", self._on_spotify_ended)
+        self._spotify_controller.connect("no-device", self._on_spotify_no_device)
+        self._spotify_controller.connect("error", self._on_spotify_error)
 
         self.add_css_class("toolbar")
         self.add_css_class("purrr-playback-card")
@@ -140,6 +155,10 @@ class PlaybackBar(Gtk.Box):
         self._set_controls_sensitive(False)
 
     def play_queue_item(self, item: QueueItem) -> None:
+        if item.source == "spotify":
+            self._play_spotify_queue_item(item)
+            return
+        self._set_playback_mode("local")
         self._pending_track_id = item.track_id
         if item.local_path and Path(item.local_path).exists():
             self._start_playback(item)
@@ -180,6 +199,105 @@ class PlaybackBar(Gtk.Box):
             )
         self._load_waveform(item)
         self.emit("now-playing-changed", item)
+
+    def play_station(self, station: Station) -> None:
+        """Sintoniza una radio en vivo (Rainwave, Bío-Bío, SmoothJazz, RadioTunes)
+        — a diferencia de `play_queue_item`, va directo al stream por URI: no hay
+        archivo que descargar, ni duración, ni waveform que precalcular.
+
+        RadioTunes es la única fuente cuya URI no es directamente reproducible: es
+        un `.pls` que hay que bajar y resolver primero (confirmé con
+        `gst-launch-1.0` que `playbin` no lo hace solo — ver
+        `player/pls_resolver.py`). Las demás (Rainwave/Bío-Bío/SmoothJazz) siguen
+        yendo directo al reproductor, sin este paso."""
+        self._set_playback_mode("station")
+        self._current_station = station
+        self._title_label.set_text(station.display_name)
+        self._update_art(None)
+        self._station_resolve_token = station
+        if pls_resolver.is_pls_url(station.stream_url):
+            self._artist_label.set_text("Conectando…")
+            self._set_controls_sensitive(False)
+            threading.Thread(
+                target=self._resolve_and_play_station, args=(station,), daemon=True
+            ).start()
+        else:
+            self._artist_label.set_text(station.subtitle or "En vivo")
+            self._start_station_stream(station, station.stream_url)
+
+    def _resolve_and_play_station(self, station: Station) -> None:
+        try:
+            resolved_url = pls_resolver.resolve_pls_url(station.stream_url)
+        except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+            GLib.idle_add(self._on_station_resolve_error, station, str(exc))
+            return
+        GLib.idle_add(self._start_station_stream, station, resolved_url)
+
+    def _on_station_resolve_error(self, station: Station, message: str) -> bool:
+        if self._station_resolve_token is not station:
+            return GLib.SOURCE_REMOVE  # el usuario ya cambió de estación mientras tanto
+        self.emit("playback-error", f"No se pudo conectar a «{station.display_name}»: {message}")
+        self._reset_to_idle()
+        return GLib.SOURCE_REMOVE
+
+    def _start_station_stream(self, station: Station, resolved_url: str) -> bool:
+        if self._station_resolve_token is not station:
+            return GLib.SOURCE_REMOVE  # ya se pidió otra estación, esta resolución quedó vieja
+        self.engine.load(resolved_url)
+        self.engine.play()
+        self._artist_label.set_text(station.subtitle or "En vivo")
+        self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
+        self._set_controls_sensitive(True)
+        return GLib.SOURCE_REMOVE
+
+    def play_spotify_track(self, track: SpotifyTrack, art_path: str | None = None) -> None:
+        """Reproduce un track de Spotify por Spotify Connect (control remoto — Purrr
+        nunca decodifica ese audio). A diferencia de una estación, sí hay duración
+        conocida y posición (por polling de `SpotifyConnectController`, no de
+        GStreamer) — el seek manual queda fuera de esta etapa."""
+        self._set_playback_mode("spotify")
+        self._title_label.set_text(track.title)
+        self._artist_label.set_text(track.artist or "Artista desconocido")
+        self._current_duration = max(track.duration_seconds or 1, 1)
+        self._position_label.set_text("0:00")
+        self._duration_label.set_text(_format_time(track.duration_seconds or 0))
+        self._waveform_scrubber.set_waveform([])
+        self._waveform_scrubber.set_progress(0.0)
+        self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
+        self._set_controls_sensitive(True)
+        self._update_art(art_path)
+        self._spotify_controller.play(track)
+
+    def _play_spotify_queue_item(self, item: QueueItem) -> None:
+        spotify_id = item.track_id.rsplit(":", 1)[-1] if isinstance(item.track_id, str) else str(item.track_id)
+        track = SpotifyTrack(
+            id=spotify_id, title=item.title, artist=item.artist, album=item.album,
+            duration_seconds=item.duration_seconds, art_url=None, uri=item.spotify_uri,
+        )
+        self.play_spotify_track(track, art_path=item.art_path)
+
+    def _set_playback_mode(self, mode: str) -> None:
+        if self._playback_mode == mode:
+            return
+        previous = self._playback_mode
+        self._playback_mode = mode
+        if previous == "spotify" and mode != "spotify":
+            self._spotify_controller.stop()
+        # "Siguiente/anterior" y shuffle/repeat no aplican a una radio en vivo (no hay
+        # cola detrás); para Spotify sí aplican — es un item más de la cola normal,
+        # mezclado con tracks de Drive (playlists mixtas).
+        for widget in (self._prev_button, self._next_button, self._shuffle_button, self._repeat_button):
+            widget.set_sensitive(mode != "station")
+        if mode == "station":
+            self._waveform_scrubber.set_waveform([])
+            self._waveform_scrubber.set_progress(0.0)
+            self._position_label.set_text("EN VIVO")
+            self._duration_label.set_text("")
+        elif mode == "local":
+            self._position_label.set_text("0:00")
+            self._duration_label.set_text("0:00")
+        # modo "spotify": las labels de tiempo las actualiza _on_spotify_position_updated;
+        # play_spotify_track ya deja un placeholder razonable mientras llega el primer poll.
 
     def _on_folder_cover_ready(self, track_id: int, art_path: str | None) -> None:
         if track_id != self._art_token or not art_path:
@@ -288,7 +406,15 @@ class PlaybackBar(Gtk.Box):
             widget.set_sensitive(sensitive)
 
     def _on_play_pause_clicked(self, _button) -> None:
-        if self.queue.is_empty():
+        if self._playback_mode == "spotify":
+            if self._play_pause_button.get_icon_name() == "media-playback-start-symbolic":
+                self._spotify_controller.resume()
+                self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
+            else:
+                self._spotify_controller.pause()
+                self._play_pause_button.set_icon_name("media-playback-start-symbolic")
+            return
+        if self.queue.is_empty() and self._playback_mode == "local":
             return
         if self._play_pause_button.get_icon_name() == "media-playback-start-symbolic":
             self.engine.play()
@@ -317,7 +443,9 @@ class PlaybackBar(Gtk.Box):
         self.engine.set_volume(value)
 
     def _on_scrubber_seek(self, _widget, fraction: float) -> None:
-        if self.queue.is_empty():
+        # Ni una radio en vivo ni (por ahora) Spotify Connect aceptan seek manual —
+        # ver el plan de la Fase 4 (limitación aceptada).
+        if self.queue.is_empty() or self._playback_mode != "local":
             return
         self.engine.seek(fraction * self._current_duration)
 
@@ -328,6 +456,11 @@ class PlaybackBar(Gtk.Box):
         self._duration_label.set_text(_format_time(duration))
 
     def _on_eos(self, _engine) -> None:
+        if self._playback_mode == "station":
+            # No aplica "siguiente track" a una radio en vivo — se corta sin más.
+            # Reconexión automática ante un corte queda fuera de esta etapa.
+            self._reset_to_idle()
+            return
         item = self.queue.next()
         if item:
             self.play_queue_item(item)
@@ -336,4 +469,73 @@ class PlaybackBar(Gtk.Box):
             self._waveform_scrubber.set_progress(0.0)
 
     def _on_error(self, _engine, message: str) -> None:
+        if self._playback_mode == "station":
+            self._reset_to_idle()
+        self.emit("playback-error", message)
+
+    def _on_tags_changed(self, _engine, title: str) -> None:
+        """Nombre de la canción que anuncia el stream de radio (metadata ICY) — solo
+        aplica en modo 'station': un archivo local también dispara tags al cargar
+        (sus propios título/artista embebidos), pero esos ya se muestran desde
+        `item.title`/`item.artist` en `_start_playback`, no hace falta pisarlos acá."""
+        if self._playback_mode != "station" or self._current_station is None:
+            return
+        title = title.strip()
+        if not title:
+            return
+        station_name = self._current_station.display_name
+        if " - " in title:
+            artist, _, song = title.partition(" - ")
+            artist, song = artist.strip(), song.strip()
+            self._title_label.set_text(song or title)
+            self._artist_label.set_text(f"{artist} · {station_name}" if artist else station_name)
+        else:
+            self._title_label.set_text(title)
+            self._artist_label.set_text(station_name)
+
+    def _reset_to_idle(self) -> None:
+        self._set_playback_mode("local")
+        self._title_label.set_text("Sin reproducción")
+        self._artist_label.set_text("")
+        self._play_pause_button.set_icon_name("media-playback-start-symbolic")
+        self._waveform_scrubber.set_progress(0.0)
+        self._set_controls_sensitive(not self.queue.is_empty())
+
+    # --- Spotify Connect (control remoto — ver player/spotify_connect.py) --------
+
+    def _on_spotify_position_updated(
+        self, _controller, position: float, duration: float, is_playing: bool
+    ) -> None:
+        if self._playback_mode != "spotify":
+            return  # eco tardío de una sesión que ya terminó
+        self._current_duration = max(duration, 1)
+        self._waveform_scrubber.set_progress(position / self._current_duration)
+        self._position_label.set_text(_format_time(position))
+        self._duration_label.set_text(_format_time(duration))
+        self._play_pause_button.set_icon_name(
+            "media-playback-pause-symbolic" if is_playing else "media-playback-start-symbolic"
+        )
+
+    def _on_spotify_ended(self, _controller) -> None:
+        if self._playback_mode != "spotify":
+            return
+        item = self.queue.next()
+        if item:
+            self.play_queue_item(item)
+        else:
+            self._reset_to_idle()
+
+    def _on_spotify_no_device(self, _controller) -> None:
+        self.emit(
+            "playback-error",
+            "No hay ningún dispositivo Spotify Connect activo — abre Spotify en tu "
+            "celular u otra computadora e intenta de nuevo.",
+        )
+        item = self.queue.next()
+        if item:
+            self.play_queue_item(item)
+        else:
+            self._reset_to_idle()
+
+    def _on_spotify_error(self, _controller, message: str) -> None:
         self.emit("playback-error", message)
