@@ -132,19 +132,26 @@ class PurrrWindow(Adw.ApplicationWindow):
         header_bar = Adw.HeaderBar()
         header_bar.add_css_class("flat")
 
-        # El panel de reproducción vive como columna fija a la derecha (estilo "Player"
-        # del mockup de referencia), no como barra angosta arriba del contenido.
-        self._playback_bar.set_size_request(320, -1)
+        # El panel de reproducción vive como columna a la derecha (estilo "Player" del
+        # mockup de referencia). Va en un Paned (no un Box fijo) para que el usuario pueda
+        # arrastrar el borde y redimensionarlo horizontalmente, igual que el resto de los
+        # paneles de la ventana.
+        self._playback_bar.set_size_request(260, -1)
         self._playback_bar.set_hexpand(False)
         self._playback_bar.set_vexpand(True)
 
-        body_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        body_box.append(split_view)
-        body_box.append(self._playback_bar)
+        body_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True, vexpand=True)
+        body_paned.set_start_child(split_view)
+        body_paned.set_resize_start_child(True)
+        body_paned.set_shrink_start_child(True)
+        body_paned.set_end_child(self._playback_bar)
+        body_paned.set_resize_end_child(False)
+        body_paned.set_shrink_end_child(False)
+        body_paned.set_position(960)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
-        toolbar_view.set_content(body_box)
+        toolbar_view.set_content(body_paned)
 
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(toolbar_view)
