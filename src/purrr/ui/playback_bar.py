@@ -1,4 +1,8 @@
+import hashlib
 import threading
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import gi
@@ -7,9 +11,12 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import GLib, GObject, Gtk, Pango
 
+from purrr.cache import manager as cache_manager
+from purrr.metadata import cover_search
 from purrr.player import pls_resolver
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
+from purrr.player.sources import rainwave as rainwave_source
 from purrr.player.spotify_connect import SpotifyConnectController
 from purrr.player.station import Station
 from purrr.spotify.track import SpotifyTrack
@@ -19,6 +26,7 @@ from purrr.ui.waveform_scrubber import WaveformScrubber
 
 _ART_THUMB_SIZE = 240  # carátula grande, centrada arriba del panel de reproducción
 _ART_EXPANDED_SIZE = 360
+_RAINWAVE_POLL_SECONDS = 20  # canciones duran minutos; esto alcanza para no perderse un cambio
 
 
 def _format_time(seconds: float) -> str:
@@ -30,6 +38,10 @@ class PlaybackBar(Gtk.Box):
     __gsignals__ = {
         "playback-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "now-playing-changed": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # QueueItem
+        # 'local' | 'station' | 'spotify' — sobre todo para que window.py sepa cuándo
+        # apagar el resalte de la fila de una radio (ver ui/stations_view.py) al
+        # dejar de sonar, sin importar por qué (otra fuente, fin de stream, error).
+        "playback-mode-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self, engine: PlayerEngine, queue: PlayQueue, sync_controller: SyncController):
@@ -43,6 +55,12 @@ class PlaybackBar(Gtk.Box):
         self._art_token: int | None = None
         self._playback_mode = "local"  # 'local' | 'station' | 'spotify'
         self._station_resolve_token: Station | None = None
+        self._station_art_token: object | None = None
+        # Rainwave no manda metadata ICY (ver player/sources/rainwave.py), así que en
+        # vez de esperar tags del stream (como con Bío-Bío/SmoothJazz/RadioTunes) hay
+        # que pedirle la canción actual a su API pública en un hilo — ver play_station.
+        self._rainwave_poll_token: Station | None = None
+        self._rainwave_last_title: str | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
@@ -132,19 +150,26 @@ class PlaybackBar(Gtk.Box):
         controls_row.append(self._repeat_button)
         self.append(controls_row)
 
-        # --- Volumen, al final -----------------------------------------------
-        volume_adjustment = Gtk.Adjustment(value=1.0, lower=0.0, upper=1.0, step_increment=0.05)
-        self._volume_button = Gtk.ScaleButton(adjustment=volume_adjustment, halign=Gtk.Align.CENTER)
-        self._volume_button.set_icons(
-            [
-                "audio-volume-muted-symbolic",
-                "audio-volume-high-symbolic",
-                "audio-volume-low-symbolic",
-                "audio-volume-medium-symbolic",
-            ]
+        # --- Volumen, al final: deslizador + ícono que hace mute/unmute --------
+        self._pre_mute_volume = 1.0
+        self._volume_adjustment = Gtk.Adjustment(value=1.0, lower=0.0, upper=1.0, step_increment=0.05)
+        self._volume_adjustment.connect("value-changed", self._on_volume_changed)
+
+        self._volume_icon_button = Gtk.Button(
+            icon_name="audio-volume-high-symbolic", has_frame=False, tooltip_text="Silenciar"
         )
-        self._volume_button.connect("value-changed", self._on_volume_changed)
-        self.append(self._volume_button)
+        self._volume_icon_button.connect("clicked", self._on_volume_icon_clicked)
+
+        self._volume_scale = Gtk.Scale(
+            orientation=Gtk.Orientation.HORIZONTAL, adjustment=self._volume_adjustment, hexpand=True
+        )
+        self._volume_scale.set_draw_value(False)
+        self._volume_scale.set_size_request(120, -1)
+
+        volume_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.CENTER)
+        volume_row.append(self._volume_icon_button)
+        volume_row.append(self._volume_scale)
+        self.append(volume_row)
 
         self._set_controls_sensitive(False)
 
@@ -207,8 +232,15 @@ class PlaybackBar(Gtk.Box):
         self._set_playback_mode("station")
         self._current_station = station
         self._title_label.set_text(station.display_name)
+        self._station_art_token = None
         self._update_art(None)
         self._station_resolve_token = station
+        self._rainwave_last_title = None
+        if station.provider == "rainwave":
+            self._rainwave_poll_token = station
+            self._start_rainwave_polling(station)
+        else:
+            self._rainwave_poll_token = None
         if pls_resolver.is_pls_url(station.stream_url):
             self._artist_label.set_text("Conectando…")
             self._set_controls_sensitive(False)
@@ -275,8 +307,15 @@ class PlaybackBar(Gtk.Box):
             return
         previous = self._playback_mode
         self._playback_mode = mode
+        self.emit("playback-mode-changed", mode)
         if previous == "spotify" and mode != "spotify":
             self._spotify_controller.stop()
+        if previous == "station" and mode != "station":
+            # Se dejó de escuchar una radio para pasar a otra fuente — sin esto, el
+            # polling de Rainwave (si era la que sonaba) seguiría pisando el título y
+            # la carátula del track/track de Spotify recién elegido.
+            self._rainwave_poll_token = None
+            self._station_art_token = None
         # "Siguiente/anterior" y shuffle/repeat no aplican a una radio en vivo (no hay
         # cola detrás); para Spotify sí aplican — es un item más de la cola normal,
         # mezclado con tracks de Drive (playlists mixtas).
@@ -433,8 +472,34 @@ class PlaybackBar(Gtk.Box):
     def _on_repeat_toggled(self, button: Gtk.ToggleButton) -> None:
         self.queue.repeat = button.get_active()
 
-    def _on_volume_changed(self, _button, value: float) -> None:
+    def _on_volume_changed(self, adjustment: Gtk.Adjustment) -> None:
+        value = adjustment.get_value()
         self.engine.set_volume(value)
+        if value > 0.0:
+            # Recordamos el último volumen "con sonido" para restaurarlo al desactivar
+            # el mute — así el ícono no vuelve siempre al 100% sin importar de dónde
+            # venía el usuario.
+            self._pre_mute_volume = value
+        self._update_volume_icon(value)
+
+    def _on_volume_icon_clicked(self, _button) -> None:
+        if self._volume_adjustment.get_value() > 0.0:
+            self._pre_mute_volume = self._volume_adjustment.get_value()
+            self._volume_adjustment.set_value(0.0)
+        else:
+            self._volume_adjustment.set_value(self._pre_mute_volume or 1.0)
+
+    def _update_volume_icon(self, value: float) -> None:
+        if value <= 0.0:
+            icon, tooltip = "audio-volume-muted-symbolic", "Reactivar sonido"
+        elif value < 0.34:
+            icon, tooltip = "audio-volume-low-symbolic", "Silenciar"
+        elif value < 0.67:
+            icon, tooltip = "audio-volume-medium-symbolic", "Silenciar"
+        else:
+            icon, tooltip = "audio-volume-high-symbolic", "Silenciar"
+        self._volume_icon_button.set_icon_name(icon)
+        self._volume_icon_button.set_tooltip_text(tooltip)
 
     def _on_scrubber_seek(self, _widget, fraction: float) -> None:
         # Ni una radio en vivo ni (por ahora) Spotify Connect aceptan seek manual —
@@ -483,9 +548,111 @@ class PlaybackBar(Gtk.Box):
             artist, song = artist.strip(), song.strip()
             self._title_label.set_text(song or title)
             self._artist_label.set_text(f"{artist} · {station_name}" if artist else station_name)
+            self._fetch_station_track_art(artist, song)
         else:
+            # No todos los streams mandan "Artista - Canción" (Rainwave, por ejemplo, no
+            # manda nada útil acá) — sin ese dato no hay con qué buscar carátula, así
+            # que solo mostramos el nombre de la estación, sin arte.
             self._title_label.set_text(title)
             self._artist_label.set_text(station_name)
+            self._station_art_token = None
+            self._update_art(None)
+
+    def _fetch_station_track_art(self, artist: str, song: str) -> None:
+        """Busca en la API pública de iTunes la carátula de la canción que el stream
+        acaba de anunciar (mismo mecanismo que `metadata/cover_search.py` usa para
+        álbumes, pero automático: sin diálogo de aprobación, se toma el primer
+        resultado). Sin conexión o sin resultados, el espacio de arte queda vacío —
+        nunca bloquea ni corta la reproducción. Ver `_apply_rainwave_now_playing`
+        para el caso de Rainwave, que ya trae su propia URL de carátula (no hace
+        falta adivinarla por búsqueda)."""
+        token = (artist, song)
+        self._station_art_token = token
+        self._update_art(None)  # limpia la carátula de la canción anterior mientras busca
+        if not artist and not song:
+            return
+
+        def worker() -> None:
+            try:
+                candidates = cover_search.search_covers(f"{artist} {song}".strip(), limit=1)
+                if not candidates:
+                    return
+                url = candidates[0].thumb_url
+                data = cover_search.download_cover(url)
+            except Exception:  # noqa: BLE001 — sin arte para esta canción, no es un error visible
+                return
+            self._save_and_apply_art(url, data, f"station-{hashlib.sha1(f'{artist}|{song}'.encode()).hexdigest()}", token)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _save_and_apply_art(self, url: str, data: bytes, key: str, token: object) -> None:
+        """Corre en el hilo de descarga: cachea los bytes y agenda aplicarlos en el
+        hilo principal de GTK (ver `_apply_station_art`)."""
+        ext = Path(urllib.parse.urlparse(url).path).suffix or ".jpg"
+        path = cache_manager.art_cache_path(key, ext)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        GLib.idle_add(self._apply_station_art, token, str(path))
+
+    def _apply_station_art(self, token: object, path: str) -> bool:
+        if self._station_art_token != token:
+            return GLib.SOURCE_REMOVE  # la canción ya cambió mientras se buscaba/bajaba
+        self._update_art(path)
+        return GLib.SOURCE_REMOVE
+
+    # --- Rainwave: sin metadata ICY, así que se pide por su API pública ------
+
+    def _start_rainwave_polling(self, station: Station) -> None:
+        """Rainwave no manda "Artista - Canción" en el stream (ver
+        player/sources/rainwave.py), así que en vez de esperar tags acá se pregunta
+        a su API cada `_RAINWAVE_POLL_SECONDS` mientras esta siga siendo la estación
+        activa — el propio `while` corta el hilo solo en cuanto cambias de estación
+        (se nota, como mucho, un poll de atraso)."""
+
+        def worker() -> None:
+            while self._rainwave_poll_token is station:
+                try:
+                    info = rainwave_source.get_now_playing(station.slug)
+                except Exception:  # noqa: BLE001 — sin conexión, se reintenta en el próximo poll
+                    info = None
+                if self._rainwave_poll_token is not station:
+                    return
+                if info:
+                    GLib.idle_add(self._apply_rainwave_now_playing, station, info)
+                time.sleep(_RAINWAVE_POLL_SECONDS)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_rainwave_now_playing(self, station: Station, info: rainwave_source.NowPlaying) -> bool:
+        if self._rainwave_poll_token is not station:
+            return GLib.SOURCE_REMOVE  # ya cambiaste de estación mientras se pedía esto
+        station_name = station.display_name
+        self._title_label.set_text(info.title or station_name)
+        self._artist_label.set_text(f"{info.artist} · {station_name}" if info.artist else station_name)
+        if info.title and info.title != self._rainwave_last_title:
+            self._rainwave_last_title = info.title
+            token = (station.slug, info.title)
+            self._station_art_token = token
+            self._fetch_url_art(info.art_url, token)
+        return GLib.SOURCE_REMOVE
+
+    def _fetch_url_art(self, url: str | None, token: object) -> None:
+        """A diferencia de `_fetch_station_track_art` (que busca a ciegas en iTunes),
+        acá ya sabemos exactamente qué imagen bajar — la trae la propia API de
+        Rainwave junto con el título/artista."""
+        if not url:
+            return
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "Purrr/0.1"})
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    data = response.read()
+            except Exception:  # noqa: BLE001 — sin arte para esta canción, no es un error visible
+                return
+            self._save_and_apply_art(url, data, f"url-{hashlib.sha1(url.encode()).hexdigest()}", token)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _reset_to_idle(self) -> None:
         self._set_playback_mode("local")
@@ -494,6 +661,9 @@ class PlaybackBar(Gtk.Box):
         self._play_pause_button.set_icon_name("media-playback-start-symbolic")
         self._waveform_scrubber.set_progress(0.0)
         self._set_controls_sensitive(not self.queue.is_empty())
+        self._station_art_token = None
+        self._rainwave_poll_token = None
+        self._update_art(None)
 
     # --- Spotify Connect (control remoto — ver player/spotify_connect.py) --------
 

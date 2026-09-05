@@ -9,7 +9,10 @@ _LIBRARY_ROW = "library"
 _FOLDERS_ROW = "folders"
 _ALBUMS_ROW = "albums"
 _SOURCES_ROW = "sources"
-_RADIOS_ROW = "radios"
+_RAINWAVE_ROW = "rainwave"
+_RADIOTUNES_ROW = "radiotunes"
+_BIOBIO_ROW = "biobio"
+_SMOOTHJAZZ_ROW = "smoothjazz"
 _SPOTIFY_ROW = "spotify"
 _MOOD_ROW = "mood"
 _CLOUD_ROW = "cloud"
@@ -22,7 +25,12 @@ class Sidebar(Gtk.Box):
         "folders-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "albums-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sources-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
-        "radios-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # Antes era una sola sección "Radios" con las 4 fuentes agrupadas adentro
+        # (ver ui/stations_view.py); ahora cada una es su propia fila del menú.
+        "rainwave-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "radiotunes-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "biobio-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "smoothjazz-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "spotify-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "mood-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "cloud-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -61,8 +69,17 @@ class Sidebar(Gtk.Box):
         self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
         self._list_box.append(self._sources_row)
 
-        self._radios_row = self._make_row("Radios", "network-wireless-signal-excellent-symbolic")
-        self._list_box.append(self._radios_row)
+        self._rainwave_row = self._make_row("Rainwave", "applications-games-symbolic")
+        self._list_box.append(self._rainwave_row)
+
+        self._radiotunes_row = self._make_row("RadioTunes", "radio-symbolic")
+        self._list_box.append(self._radiotunes_row)
+
+        self._biobio_row = self._make_row("Radio Bío-Bío", "network-transmit-symbolic")
+        self._list_box.append(self._biobio_row)
+
+        self._smoothjazz_row = self._make_row("SmoothJazz.com", "audio-speakers-symbolic")
+        self._list_box.append(self._smoothjazz_row)
 
         self._spotify_row = self._make_row("Spotify", "audio-headphones-symbolic")
         self._list_box.append(self._spotify_row)
@@ -100,8 +117,17 @@ class Sidebar(Gtk.Box):
     def select_sources_row(self) -> None:
         self._list_box.select_row(self._sources_row)
 
-    def select_radios_row(self) -> None:
-        self._list_box.select_row(self._radios_row)
+    def select_rainwave_row(self) -> None:
+        self._list_box.select_row(self._rainwave_row)
+
+    def select_radiotunes_row(self) -> None:
+        self._list_box.select_row(self._radiotunes_row)
+
+    def select_biobio_row(self) -> None:
+        self._list_box.select_row(self._biobio_row)
+
+    def select_smoothjazz_row(self) -> None:
+        self._list_box.select_row(self._smoothjazz_row)
 
     def select_spotify_row(self) -> None:
         self._list_box.select_row(self._spotify_row)
@@ -154,8 +180,14 @@ class Sidebar(Gtk.Box):
             self.emit("albums-selected")
         elif row is self._sources_row:
             self.emit("sources-selected")
-        elif row is self._radios_row:
-            self.emit("radios-selected")
+        elif row is self._rainwave_row:
+            self.emit("rainwave-selected")
+        elif row is self._radiotunes_row:
+            self.emit("radiotunes-selected")
+        elif row is self._biobio_row:
+            self.emit("biobio-selected")
+        elif row is self._smoothjazz_row:
+            self.emit("smoothjazz-selected")
         elif row is self._spotify_row:
             self.emit("spotify-selected")
         elif row is self._mood_row:

@@ -23,7 +23,10 @@ from purrr.mood.queue_builder import build_mood_queue
 from purrr.mpris.service import MprisService
 from purrr.player.engine import PlayerEngine
 from purrr.player.queue import PlayQueue, QueueItem
+from purrr.player.sources import biobio as biobio_source
 from purrr.player.sources import radiotunes as radiotunes_source
+from purrr.player.sources import rainwave as rainwave_source
+from purrr.player.sources import smoothjazz as smoothjazz_source
 from purrr.player.station import Station
 from purrr.spotify import client as spotify_client
 from purrr.spotify.track import SpotifyTrack
@@ -43,7 +46,7 @@ from purrr.ui.playlist_picker import open_playlist_picker
 from purrr.ui.playlist_view import PlaylistView
 from purrr.ui.sidebar import Sidebar
 from purrr.ui.spotify_view import SpotifyView
-from purrr.ui.stations_view import StationsView
+from purrr.ui.stations_view import RadioTunesView, SimpleStationsView
 
 
 def _folder_name(folder_path: str | None) -> str | None:
@@ -68,6 +71,9 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._current_playlist_id: int | None = None
         self._current_search_text: str | None = None
         self._track_updated_source_id: int | None = None
+        # Vista (Rainwave/RadioTunes/Bío-Bío/SmoothJazz) cuya fila está resaltada
+        # como "sonando ahora" — ver _on_station_activated/_on_playback_mode_changed.
+        self._active_station_view = None
 
         self._sidebar = Sidebar()
         self._library_view = LibraryView()
@@ -75,7 +81,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view = AlbumsView()
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
-        self._stations_view = StationsView()
+        self._rainwave_view = SimpleStationsView("Rainwave", rainwave_source.list_stations())
+        self._radiotunes_view = RadioTunesView()
+        self._biobio_view = SimpleStationsView("Radio Bío-Bío", biobio_source.list_stations())
+        self._smoothjazz_view = SimpleStationsView("SmoothJazz.com", smoothjazz_source.list_stations())
         self._spotify_view = SpotifyView()
         self._mood_view = MoodView()
         self._cloud_settings_view = CloudSettingsView()
@@ -105,7 +114,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._content_stack.add_named(self._albums_view, "albums")
         self._content_stack.add_named(self._playlist_view, "playlist")
         self._content_stack.add_named(self._sources_view, "sources")
-        self._content_stack.add_named(self._stations_view, "radios")
+        self._content_stack.add_named(self._rainwave_view, "rainwave")
+        self._content_stack.add_named(self._radiotunes_view, "radiotunes")
+        self._content_stack.add_named(self._biobio_view, "biobio")
+        self._content_stack.add_named(self._smoothjazz_view, "smoothjazz")
         self._content_stack.add_named(self._spotify_view, "spotify")
         self._content_stack.add_named(self._mood_view, "mood")
         self._content_stack.add_named(self._cloud_settings_view, "cloud")
@@ -143,7 +155,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sidebar.connect("folders-selected", self._on_folders_selected)
         self._sidebar.connect("albums-selected", self._on_albums_selected)
         self._sidebar.connect("sources-selected", self._on_sources_selected)
-        self._sidebar.connect("radios-selected", self._on_radios_selected)
+        self._sidebar.connect("rainwave-selected", self._on_rainwave_selected)
+        self._sidebar.connect("radiotunes-selected", self._on_radiotunes_selected)
+        self._sidebar.connect("biobio-selected", self._on_biobio_selected)
+        self._sidebar.connect("smoothjazz-selected", self._on_smoothjazz_selected)
         self._sidebar.connect("spotify-selected", self._on_spotify_selected)
         self._sidebar.connect("mood-selected", self._on_mood_selected)
         self._sidebar.connect("cloud-selected", self._on_cloud_selected)
@@ -175,10 +190,13 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.connect("metadata-scan-requested", self._on_metadata_scan_requested)
         self._sources_view.connect("delete-source-requested", self._on_delete_source_requested)
 
-        self._stations_view.connect("station-activated", self._on_station_activated)
-        self._stations_view.connect(
+        self._rainwave_view.connect("station-activated", self._on_station_activated)
+        self._radiotunes_view.connect("station-activated", self._on_station_activated)
+        self._radiotunes_view.connect(
             "radiotunes-key-save-requested", self._on_radiotunes_key_save_requested
         )
+        self._biobio_view.connect("station-activated", self._on_station_activated)
+        self._smoothjazz_view.connect("station-activated", self._on_station_activated)
 
         self._spotify_view.connect("client-id-save-requested", self._on_spotify_client_id_save_requested)
         self._spotify_view.connect("connect-requested", self._on_spotify_connect_requested)
@@ -212,6 +230,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._playback_bar.connect("playback-error", self._on_playback_error)
         self._playback_bar.connect("now-playing-changed", self._on_now_playing_changed)
+        self._playback_bar.connect("playback-mode-changed", self._on_playback_mode_changed)
 
     def _reload_all(self) -> None:
         self._library_view.refresh(database.list_tracks())
@@ -237,9 +256,18 @@ class PurrrWindow(Adw.ApplicationWindow):
         elif last_view == "sources":
             self._on_sources_selected(self._sidebar)
             self._sidebar.select_sources_row()
-        elif last_view == "radios":
-            self._on_radios_selected(self._sidebar)
-            self._sidebar.select_radios_row()
+        elif last_view == "rainwave":
+            self._on_rainwave_selected(self._sidebar)
+            self._sidebar.select_rainwave_row()
+        elif last_view == "radiotunes":
+            self._on_radiotunes_selected(self._sidebar)
+            self._sidebar.select_radiotunes_row()
+        elif last_view == "biobio":
+            self._on_biobio_selected(self._sidebar)
+            self._sidebar.select_biobio_row()
+        elif last_view == "smoothjazz":
+            self._on_smoothjazz_selected(self._sidebar)
+            self._sidebar.select_smoothjazz_row()
         elif last_view == "spotify":
             self._on_spotify_selected(self._sidebar)
             self._sidebar.select_spotify_row()
@@ -282,11 +310,26 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.refresh_sources(database.list_sources())
         database.set_state("last_view", "sources")
 
-    def _on_radios_selected(self, _sidebar) -> None:
-        self._content_page.set_title("Radios")
-        self._content_stack.set_visible_child_name("radios")
-        database.set_state("last_view", "radios")
+    def _on_rainwave_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Rainwave")
+        self._content_stack.set_visible_child_name("rainwave")
+        database.set_state("last_view", "rainwave")
+
+    def _on_radiotunes_selected(self, _sidebar) -> None:
+        self._content_page.set_title("RadioTunes")
+        self._content_stack.set_visible_child_name("radiotunes")
+        database.set_state("last_view", "radiotunes")
         self._refresh_radiotunes_view()
+
+    def _on_biobio_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Radio Bío-Bío")
+        self._content_stack.set_visible_child_name("biobio")
+        database.set_state("last_view", "biobio")
+
+    def _on_smoothjazz_selected(self, _sidebar) -> None:
+        self._content_page.set_title("SmoothJazz.com")
+        self._content_stack.set_visible_child_name("smoothjazz")
+        database.set_state("last_view", "smoothjazz")
 
     def _on_spotify_selected(self, _sidebar) -> None:
         self._content_page.set_title("Spotify")
@@ -344,20 +387,31 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_folder_scan_requested(self, _view, source_id: int, folder_path: str) -> None:
         self._sync_controller.start_metadata_scan(source_id, folder_path)
 
-    def _on_station_activated(self, _view, station: Station) -> None:
+    def _on_station_activated(self, view, station: Station) -> None:
+        if self._active_station_view is not None and self._active_station_view is not view:
+            self._active_station_view.set_now_playing(None)
+        view.set_now_playing(station.slug)
+        self._active_station_view = view
         self._playback_bar.play_station(station)
+
+    def _on_playback_mode_changed(self, _bar, mode: str) -> None:
+        # Se dejó de sonar una radio (se pasó a Biblioteca/Spotify, o el stream se
+        # cortó solo) — apaga el resalte de la fila que había quedado marcada.
+        if mode != "station" and self._active_station_view is not None:
+            self._active_station_view.set_now_playing(None)
+            self._active_station_view = None
 
     def _on_radiotunes_key_save_requested(self, _view, key: str) -> None:
         radiotunes_source.save_listen_key(key)
-        self._stations_view.set_radiotunes_configured(True)
+        self._radiotunes_view.set_configured(True)
         self._refresh_radiotunes_view()
 
     def _refresh_radiotunes_view(self) -> None:
         configured = radiotunes_source.is_configured()
-        self._stations_view.set_radiotunes_configured(configured)
+        self._radiotunes_view.set_configured(configured)
         if not configured:
             return
-        self._stations_view.show_radiotunes_loading()
+        self._radiotunes_view.show_loading()
 
         def worker() -> None:
             try:
@@ -365,7 +419,7 @@ class PurrrWindow(Adw.ApplicationWindow):
             except Exception as exc:  # noqa: BLE001 — se reporta a la UI
                 GLib.idle_add(self._toast, f"No se pudo cargar el catálogo de RadioTunes: {exc}")
                 stations = []
-            GLib.idle_add(self._stations_view.show_radiotunes_channels, stations)
+            GLib.idle_add(self._radiotunes_view.show_channels, stations)
 
         threading.Thread(target=worker, daemon=True).start()
 

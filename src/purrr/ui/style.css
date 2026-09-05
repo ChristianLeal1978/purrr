@@ -151,6 +151,15 @@ headerbar.flat {
     font-weight: bold;
 }
 
+/* En library_view.py la clase se aplica directo a un Gtk.Label; en stations_view.py
+   se aplica a la Adw.ActionRow entera (no hay forma pública de llegar a su título
+   interno), así que esta variante de descendiente cubre ese caso — la fila de una
+   estación de radio sonando queda resaltada igual. */
+.purrr-now-playing .title {
+    color: @purrr_accent_hover;
+    font-weight: bold;
+}
+
 .purrr-scan-progress {
     min-height: 3px;
 }
