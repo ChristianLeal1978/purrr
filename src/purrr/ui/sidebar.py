@@ -50,10 +50,6 @@ class Sidebar(Gtk.Box):
         brand_box.append(brand_label)
         self.append(brand_box)
 
-        menu_header = Gtk.Label(label="Menú", halign=Gtk.Align.START)
-        menu_header.add_css_class("purrr-sidebar-section-label")
-        self.append(menu_header)
-
         self._list_box = Gtk.ListBox(css_classes=["navigation-sidebar", "purrr-sidebar-list"])
         self._list_box.connect("row-activated", self._on_row_activated)
 
@@ -65,9 +61,6 @@ class Sidebar(Gtk.Box):
 
         self._albums_row = self._make_row("Álbumes", "media-optical-symbolic")
         self._list_box.append(self._albums_row)
-
-        self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
-        self._list_box.append(self._sources_row)
 
         self._rainwave_row = self._make_row("Rainwave", "applications-games-symbolic")
         self._list_box.append(self._rainwave_row)
@@ -87,17 +80,18 @@ class Sidebar(Gtk.Box):
         self._mood_row = self._make_row("Ánimo", "face-smile-symbolic")
         self._list_box.append(self._mood_row)
 
-        self._cloud_row = self._make_row("Cuenta / Sync", "network-server-symbolic")
-        self._list_box.append(self._cloud_row)
-
-        header = Gtk.ListBoxRow(selectable=False, activatable=False)
-        header_label = Gtk.Label(label="Playlists", halign=Gtk.Align.START, margin_top=12)
-        header_label.add_css_class("purrr-sidebar-section-label")
-        header.set_child(header_label)
-        self._list_box.append(header)
+        self._list_box.append(self._make_section_header("Playlists"))
 
         self._new_playlist_row = self._make_row("Nueva playlist…", "list-add-symbolic")
         self._list_box.append(self._new_playlist_row)
+
+        self._list_box.append(self._make_section_header("Administrar"))
+
+        self._sources_row = self._make_row("Fuentes de Google Drive", "folder-remote-symbolic")
+        self._list_box.append(self._sources_row)
+
+        self._cloud_row = self._make_row("Cuenta / Sync", "network-server-symbolic")
+        self._list_box.append(self._cloud_row)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_child(self._list_box)
@@ -143,6 +137,13 @@ class Sidebar(Gtk.Box):
             if pid == playlist_id:
                 self._list_box.select_row(row)
                 return
+
+    def _make_section_header(self, label: str) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow(selectable=False, activatable=False)
+        header_label = Gtk.Label(label=label, halign=Gtk.Align.START, margin_top=12)
+        header_label.add_css_class("purrr-sidebar-section-label")
+        row.set_child(header_label)
+        return row
 
     def _make_row(self, label: str, icon_name: str) -> Gtk.ListBoxRow:
         row = Gtk.ListBoxRow()
