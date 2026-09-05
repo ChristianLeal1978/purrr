@@ -1,11 +1,22 @@
+import threading
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GObject, Gtk
+gi.require_version("Pango", "1.0")
+from gi.repository import Adw, GLib, GObject, Gtk, Pango
 
+from purrr.cache import manager as cache_manager
 from purrr.player.station import Station
 from purrr.ui.markup import escape
+from purrr.ui.textures import load_texture_at_size
+
+_TILE_SIZE = 130
+_USER_AGENT = "Purrr/0.1 (+https://github.com/christianlealreyes/purrr)"
 
 
 def _make_station_row(station: Station, emitter: GObject.Object) -> Adw.ActionRow:
@@ -17,6 +28,92 @@ def _make_station_row(station: Station, emitter: GObject.Object) -> Adw.ActionRo
     row.add_suffix(play_button)
     row.set_activatable_widget(play_button)
     return row
+
+
+class _StationTile(Gtk.Button):
+    """Cuadrado con la carátula de un canal de RadioTunes (por ahora el único
+    proveedor que trae `station.art_url`, ver player/sources/radiotunes.py) —
+    clickeable entero, con borde de acento y un ícono de play superpuesto
+    mientras es el canal sonando (ver `set_playing`). Sin carátula (todavía
+    cargando, o si nunca llega), cae a un ícono genérico — nunca deja el
+    cuadro vacío."""
+
+    def __init__(self, station: Station, emitter: GObject.Object):
+        super().__init__(has_frame=False, css_classes=["flat"], tooltip_text=station.display_name)
+        self.slug = station.slug
+        self.connect("clicked", lambda _b, s=station: emitter.emit("station-activated", s))
+
+        self._art = Gtk.Overlay(css_classes=["purrr-station-tile-art"])
+        self._art.set_overflow(Gtk.Overflow.HIDDEN)
+        self._art.set_size_request(_TILE_SIZE, _TILE_SIZE)
+
+        self._picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        self._art.set_child(self._picture)
+
+        self._fallback_icon = Gtk.Image(
+            icon_name="radio-symbolic", pixel_size=40, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER
+        )
+        self._art.add_overlay(self._fallback_icon)
+
+        self._scrim = Gtk.Box(css_classes=["purrr-station-tile-scrim"], visible=False)
+        self._scrim.append(
+            Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=36,
+                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        )
+        self._art.add_overlay(self._scrim)
+
+        label = Gtk.Label(
+            label=escape(station.display_name), wrap=True, justify=Gtk.Justification.CENTER,
+            lines=2, ellipsize=Pango.EllipsizeMode.END, max_width_chars=14,
+            halign=Gtk.Align.CENTER, use_markup=True,
+        )
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(self._art)
+        box.append(label)
+        self.set_child(box)
+
+    def set_art_texture(self, texture) -> None:
+        self._picture.set_paintable(texture)
+        self._fallback_icon.set_visible(texture is None)
+
+    def set_playing(self, playing: bool) -> None:
+        if playing:
+            self._art.add_css_class("purrr-station-tile-playing")
+        else:
+            self._art.remove_css_class("purrr-station-tile-playing")
+        self._scrim.set_visible(playing)
+
+
+def _load_tile_art(tile: _StationTile, station: Station, on_ready) -> None:
+    """Carga la carátula del canal en el cuadro: si ya está cacheada en disco de una
+    sesión anterior la aplica al toque (sin red); si no, la baja en un hilo aparte y
+    recién ahí llama a `on_ready` (agendado con GLib.idle_add — thread-safe para
+    tocar widgets)."""
+    if not station.art_url:
+        return
+    ext = Path(urllib.parse.urlparse(station.art_url).path).suffix or ".jpg"
+    cache_path = cache_manager.art_cache_path(f"radiotunes-{station.slug}", ext)
+    if cache_path.exists():
+        texture = load_texture_at_size(str(cache_path), _TILE_SIZE)
+        if texture:
+            tile.set_art_texture(texture)
+        return
+
+    def worker() -> None:
+        try:
+            request = urllib.request.Request(station.art_url, headers={"User-Agent": _USER_AGENT})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                data = response.read()
+        except Exception:  # noqa: BLE001 — sin carátula, se queda con el ícono genérico
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(data)
+        texture = load_texture_at_size(str(cache_path), _TILE_SIZE)
+        if texture:
+            GLib.idle_add(on_ready, texture)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 class SimpleStationsView(Gtk.Box):
@@ -79,7 +176,7 @@ class RadioTunesView(Gtk.Box):
 
         self._all_stations: list[Station] = []
         self._now_playing_slug: str | None = None
-        self._rows_by_slug: dict[str, Adw.ActionRow] = {}
+        self._tiles_by_slug: dict[str, _StationTile] = {}
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         content.set_margin_top(24)
@@ -115,13 +212,22 @@ class RadioTunesView(Gtk.Box):
         self._box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, visible=False)
         self._search = Gtk.SearchEntry(placeholder_text="Buscar canal (~99 disponibles)")
         self._search.connect(
-            "search-changed", lambda entry: self._render_rows(self._filtered(entry.get_text()))
+            "search-changed", lambda entry: self._render_tiles(self._filtered(entry.get_text()))
         )
         self._box.append(self._search)
-        self._list = Gtk.ListBox(css_classes=["boxed-list"])
-        list_scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=320)
-        list_scrolled.set_child(self._list)
-        self._box.append(list_scrolled)
+        # Cuadrícula (no lista): cada canal es un cuadrado con su carátula — ver
+        # _StationTile más arriba.
+        self._grid = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            homogeneous=True,
+            column_spacing=16,
+            row_spacing=16,
+            min_children_per_line=2,
+            max_children_per_line=8,
+        )
+        grid_scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=320)
+        grid_scrolled.set_child(self._grid)
+        self._box.append(grid_scrolled)
         content.append(self._box)
 
         self.set_configured(False)
@@ -153,26 +259,27 @@ class RadioTunesView(Gtk.Box):
         self._loading_label.set_visible(False)
         self._box.set_visible(True)
         self._all_stations = stations
-        self._render_rows(self._filtered(self._search.get_text()))
+        self._render_tiles(self._filtered(self._search.get_text()))
 
-    def _render_rows(self, stations: list[Station]) -> None:
-        while row := self._list.get_row_at_index(0):
-            self._list.remove(row)
-        self._rows_by_slug = {}
+    def _render_tiles(self, stations: list[Station]) -> None:
+        child = self._grid.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self._grid.remove(child)
+            child = next_child
+        self._tiles_by_slug = {}
         for station in stations:
-            row = _make_station_row(station, self)
+            tile = _StationTile(station, self)
             if station.slug == self._now_playing_slug:
-                row.add_css_class("purrr-now-playing")
-            self._rows_by_slug[station.slug] = row
-            self._list.append(row)
+                tile.set_playing(True)
+            self._tiles_by_slug[station.slug] = tile
+            self._grid.append(tile)
+            _load_tile_art(tile, station, tile.set_art_texture)
 
     def set_now_playing(self, slug: str | None) -> None:
         """Ver SimpleStationsView.set_now_playing — acá además hay que recordar el
-        slug aparte, porque el buscador reconstruye las filas (`_render_rows`) y
-        perdería el resalte si solo tocáramos las filas ya dibujadas."""
+        slug aparte, porque el buscador reconstruye los cuadros (`_render_tiles`) y
+        perdería el resalte si solo tocáramos los que están dibujados ahora."""
         self._now_playing_slug = slug
-        for row_slug, row in self._rows_by_slug.items():
-            if row_slug == slug:
-                row.add_css_class("purrr-now-playing")
-            else:
-                row.remove_css_class("purrr-now-playing")
+        for tile_slug, tile in self._tiles_by_slug.items():
+            tile.set_playing(tile_slug == slug)

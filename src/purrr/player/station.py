@@ -11,3 +11,4 @@ class Station:
     display_name: str
     stream_url: str
     subtitle: str | None = None  # género o frecuencia, para mostrar en la fila de la UI
+    art_url: str | None = None  # carátula del canal (por ahora solo RadioTunes la trae)

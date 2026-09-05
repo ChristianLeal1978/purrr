@@ -88,6 +88,26 @@ headerbar.flat {
     font-weight: 700;
 }
 
+/* --- Cuadrícula de canales de RadioTunes (ui/stations_view.py) ------------ */
+
+.purrr-station-tile-art {
+    background-color: @purrr_surface_alt;
+    border-radius: 12px;
+    border: 3px solid transparent;
+}
+
+.purrr-station-tile-art.purrr-station-tile-playing {
+    border-color: @purrr_accent_hover;
+}
+
+.purrr-station-tile-scrim {
+    background-color: alpha(#000, 0.5);
+}
+
+.purrr-station-tile-scrim image {
+    color: #fff;
+}
+
 .purrr-chip {
     border-radius: 14px;
     padding: 10px 14px;

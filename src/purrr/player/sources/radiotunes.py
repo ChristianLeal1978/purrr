@@ -12,6 +12,13 @@ contra `http://listen.radiotunes.com/streamlist` (99 canales al momento de escri
 esto). Cada canal individual sí necesita la key: se arma como una URL `.pls` con la
 key en la query — `player/pls_resolver.py` la resuelve a la URL de stream real
 recién al momento de reproducir (ver `ui/playback_bar.py:play_station`).
+
+La carátula de cada canal NO viene en `streamlist` — sale de la API pública de
+AudioAddict (la red dueña de RadioTunes/DI.FM/etc., `api.audioaddict.com`,
+confirmada sin key con `curl`), que además de imagen trae nombre/descripción por
+canal. `images.square` llega como URI-template RFC 6570
+(`//cdn-images.audioaddict.com/.../hash.png{?size,height,width,quality,pad}`);
+`?width=&height=` sí funciona para pedir un tamaño chico (probado con `curl -I`).
 """
 
 import json
@@ -23,6 +30,8 @@ from purrr.player.station import Station
 
 _STREAMLIST_URL = "http://listen.radiotunes.com/streamlist"
 _STREAM_URL_TEMPLATE = "http://listen.radiotunes.com/premium_high/{key}.pls?{listen_key}"
+_CHANNELS_API_URL = "https://api.audioaddict.com/v1/radiotunes/channels"
+_ART_SIZE = 300
 _USER_AGENT = "Purrr/0.1 (+https://github.com/christianlealreyes/purrr)"
 
 
@@ -53,6 +62,26 @@ def is_configured() -> bool:
     return bool(load_listen_key())
 
 
+def _fetch_channel_art() -> dict[str, str]:
+    """channel key -> URL de carátula ya resuelta (300x300). Corre red aparte del
+    streamlist porque es una API distinta (AudioAddict, no RadioTunes) — si falla
+    (sin conexión, cambio de esquema) no debe tumbar el catálogo entero: quien
+    llame se queda sin carátulas, no sin canales."""
+    request = urllib.request.Request(_CHANNELS_API_URL, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        channels = json.load(response)
+    art_by_key = {}
+    for channel in channels:
+        template = channel.get("images", {}).get("square")
+        if not template:
+            continue
+        base_url = template.split("{?")[0]
+        if base_url.startswith("//"):
+            base_url = f"https:{base_url}"
+        art_by_key[channel["key"]] = f"{base_url}?width={_ART_SIZE}&height={_ART_SIZE}"
+    return art_by_key
+
+
 def list_stations() -> list[Station]:
     """Pega a la red (el catálogo, público) — llamar siempre desde un hilo de
     fondo, nunca desde el hilo de la UI. Devuelve `[]` si todavía no hay Listen
@@ -63,6 +92,10 @@ def list_stations() -> list[Station]:
     request = urllib.request.Request(_STREAMLIST_URL, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(request, timeout=15) as response:
         channels = json.load(response)
+    try:
+        art_by_key = _fetch_channel_art()
+    except Exception:  # noqa: BLE001 — sin carátulas, no sin canales
+        art_by_key = {}
     return [
         Station(
             provider="radiotunes",
@@ -70,6 +103,7 @@ def list_stations() -> list[Station]:
             display_name=channel["name"],
             stream_url=_STREAM_URL_TEMPLATE.format(key=channel["key"], listen_key=listen_key),
             subtitle=None,
+            art_url=art_by_key.get(channel["key"]),
         )
         for channel in channels
     ]
