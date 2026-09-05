@@ -33,6 +33,7 @@ class Sidebar(Gtk.Box):
         "smoothjazz-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "spotify-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "mood-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "stats-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "cloud-selected": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "playlist-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         "new-playlist-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -79,6 +80,9 @@ class Sidebar(Gtk.Box):
 
         self._mood_row = self._make_row("Ánimo", "face-smile-symbolic")
         self._list_box.append(self._mood_row)
+
+        self._stats_row = self._make_row("Estadísticas", "view-list-ordered-symbolic")
+        self._list_box.append(self._stats_row)
 
         self._list_box.append(self._make_section_header("Playlists"))
 
@@ -128,6 +132,9 @@ class Sidebar(Gtk.Box):
 
     def select_mood_row(self) -> None:
         self._list_box.select_row(self._mood_row)
+
+    def select_stats_row(self) -> None:
+        self._list_box.select_row(self._stats_row)
 
     def select_cloud_row(self) -> None:
         self._list_box.select_row(self._cloud_row)
@@ -193,6 +200,8 @@ class Sidebar(Gtk.Box):
             self.emit("spotify-selected")
         elif row is self._mood_row:
             self.emit("mood-selected")
+        elif row is self._stats_row:
+            self.emit("stats-selected")
         elif row is self._cloud_row:
             self.emit("cloud-selected")
         elif row is self._new_playlist_row:

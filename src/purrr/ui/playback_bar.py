@@ -38,6 +38,7 @@ class PlaybackBar(Gtk.Box):
     __gsignals__ = {
         "playback-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "now-playing-changed": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # QueueItem
+        "play-recorded": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # track_id, para Estadísticas
         # 'local' | 'station' | 'spotify' — sobre todo para que window.py sepa cuándo
         # apagar el resalte de la fila de una radio (ver ui/stations_view.py) al
         # dejar de sonar, sin importar por qué (otra fuente, fin de stream, error).
@@ -51,6 +52,10 @@ class PlaybackBar(Gtk.Box):
         self._sync_controller = sync_controller
         self._pending_track_id: int | None = None
         self._current_duration = 1.0
+        # Para Estadísticas: id del track ya contado como "reproducción" en esta pasada
+        # (ver _maybe_record_play) — se resetea en cada _start_playback para que la
+        # siguiente canción pueda volver a contar la suya.
+        self._play_recorded_track_id: int | None = None
         self._waveform_token: int | None = None
         self._art_token: int | None = None
         self._playback_mode = "local"  # 'local' | 'station' | 'spotify'
@@ -195,6 +200,7 @@ class PlaybackBar(Gtk.Box):
     def _start_playback(self, item: QueueItem) -> None:
         self.engine.load(Path(item.local_path))
         self.engine.play()
+        self._play_recorded_track_id = None
         self._title_label.set_text(item.title)
         self._artist_label.set_text(item.artist or "Artista desconocido")
         self._current_duration = max(item.duration_seconds, 1)
@@ -513,6 +519,21 @@ class PlaybackBar(Gtk.Box):
         self._waveform_scrubber.set_progress(position / self._current_duration)
         self._position_label.set_text(_format_time(position))
         self._duration_label.set_text(_format_time(duration))
+        self._maybe_record_play(position)
+
+    def _maybe_record_play(self, position: float) -> None:
+        """Cuenta una reproducción para Estadísticas recién al llegar a la mitad de la
+        canción (o 30s, lo que sea menor) — no en cuanto arranca. Sin este umbral,
+        saltar rápido entre canciones mientras buscás algo para escuchar inflaría el
+        contador de "más escuchadas" igual que si las hubieras escuchado enteras."""
+        if self._playback_mode != "local" or self._pending_track_id is None:
+            return
+        if self._play_recorded_track_id == self._pending_track_id:
+            return
+        threshold = min(30.0, self._current_duration / 2)
+        if position >= threshold:
+            self._play_recorded_track_id = self._pending_track_id
+            self.emit("play-recorded", self._pending_track_id)
 
     def _on_eos(self, _engine) -> None:
         if self._playback_mode == "station":

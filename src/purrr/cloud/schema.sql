@@ -116,6 +116,26 @@ alter table track_moods enable row level security;
 create policy "track_moods_owner_all" on track_moods
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- --- Estadísticas: historial de reproducciones ----------------------------
+-- Un evento por reproducción (no un contador acumulado): así dos dispositivos que
+-- suman plays offline nunca pisan el contador del otro al sincronizar — cada
+-- reproducción es su propia fila, "cuántas veces" es un COUNT(*) al leer (ver
+-- db/database.py:list_most_played_tracks/list_most_played_artists). `uuid` lo genera
+-- el cliente al registrar la reproducción, así el push es un upsert idempotente que
+-- puede reintentarse sin duplicar el evento.
+
+create table if not exists track_plays (
+    uuid        uuid primary key,
+    user_id     uuid not null references auth.users(id) on delete cascade default auth.uid(),
+    track_ref   text not null,
+    played_at   timestamptz not null default now()
+);
+
+alter table track_plays enable row level security;
+
+create policy "track_plays_owner_all" on track_plays
+    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- --- Carátulas compartidas (Fase 2) ---------------------------------------
 -- Bucket privado para las carátulas de álbumes armados a mano (búsqueda iTunes o
 -- subida manual, ver cloud/sync_engine.py:_push_album/_apply_album) — las
@@ -160,3 +180,4 @@ alter publication supabase_realtime add table playlist_items;
 alter publication supabase_realtime add table albums;
 alter publication supabase_realtime add table album_items;
 alter publication supabase_realtime add table track_moods;
+alter publication supabase_realtime add table track_plays;

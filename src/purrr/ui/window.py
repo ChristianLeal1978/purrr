@@ -47,6 +47,7 @@ from purrr.ui.playlist_view import PlaylistView
 from purrr.ui.sidebar import Sidebar
 from purrr.ui.spotify_view import SpotifyView
 from purrr.ui.stations_view import RadioTunesView, SimpleStationsView
+from purrr.ui.stats_view import StatsView
 
 
 def _folder_name(folder_path: str | None) -> str | None:
@@ -87,6 +88,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._smoothjazz_view = SimpleStationsView("SmoothJazz.com", smoothjazz_source.list_stations())
         self._spotify_view = SpotifyView()
         self._mood_view = MoodView()
+        self._stats_view = StatsView()
         self._cloud_settings_view = CloudSettingsView()
         self._playback_bar = PlaybackBar(self._engine, self._queue, self._sync_controller)
         self._mpris_service = MprisService(self._engine, self._queue, self._playback_bar)
@@ -120,6 +122,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._content_stack.add_named(self._smoothjazz_view, "smoothjazz")
         self._content_stack.add_named(self._spotify_view, "spotify")
         self._content_stack.add_named(self._mood_view, "mood")
+        self._content_stack.add_named(self._stats_view, "stats")
         self._content_stack.add_named(self._cloud_settings_view, "cloud")
 
         sidebar_page = Adw.NavigationPage(child=self._sidebar, title="Purrr")
@@ -168,6 +171,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sidebar.connect("smoothjazz-selected", self._on_smoothjazz_selected)
         self._sidebar.connect("spotify-selected", self._on_spotify_selected)
         self._sidebar.connect("mood-selected", self._on_mood_selected)
+        self._sidebar.connect("stats-selected", self._on_stats_selected)
         self._sidebar.connect("cloud-selected", self._on_cloud_selected)
         self._sidebar.connect("playlist-selected", self._on_playlist_selected)
         self._sidebar.connect("new-playlist-requested", self._on_new_playlist_requested)
@@ -215,6 +219,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._mood_view.connect("search-requested", self._on_mood_search_requested)
         self._mood_view.connect("play-mood-requested", self._on_play_mood_requested)
 
+        self._stats_view.connect("track-play-requested", self._on_stats_track_play_requested)
+
         self._mood_controller.connect("models-download-progress", self._on_mood_models_download_progress)
         self._mood_controller.connect("analysis-progress", self._on_mood_analysis_progress)
         self._mood_controller.connect("analysis-finished", self._on_mood_analysis_finished)
@@ -227,6 +233,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._cloud_sync_engine.connect("playlists-changed", self._on_cloud_playlists_changed)
         self._cloud_sync_engine.connect("albums-changed", self._on_cloud_albums_changed)
+        self._cloud_sync_engine.connect("stats-changed", self._on_cloud_stats_changed)
         self._cloud_sync_engine.connect("sync-error", self._on_cloud_sync_error)
 
         self._sync_controller.connect("progress", self._on_sync_progress)
@@ -238,6 +245,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._playback_bar.connect("playback-error", self._on_playback_error)
         self._playback_bar.connect("now-playing-changed", self._on_now_playing_changed)
         self._playback_bar.connect("playback-mode-changed", self._on_playback_mode_changed)
+        self._playback_bar.connect("play-recorded", self._on_play_recorded)
 
     def _reload_all(self) -> None:
         self._library_view.refresh(database.list_tracks())
@@ -281,6 +289,9 @@ class PurrrWindow(Adw.ApplicationWindow):
         elif last_view == "mood":
             self._on_mood_selected(self._sidebar)
             self._sidebar.select_mood_row()
+        elif last_view == "stats":
+            self._on_stats_selected(self._sidebar)
+            self._sidebar.select_stats_row()
         elif last_view == "cloud":
             self._on_cloud_selected(self._sidebar)
             self._sidebar.select_cloud_row()
@@ -348,6 +359,37 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._content_page.set_title("Ánimo")
         self._content_stack.set_visible_child_name("mood")
         database.set_state("last_view", "mood")
+
+    def _on_stats_selected(self, _sidebar) -> None:
+        self._content_page.set_title("Estadísticas")
+        self._content_stack.set_visible_child_name("stats")
+        database.set_state("last_view", "stats")
+        self._refresh_stats_view()
+
+    def _refresh_stats_view(self) -> None:
+        self._stats_view.refresh(database.list_most_played_tracks(), database.list_most_played_artists())
+
+    def _on_stats_track_play_requested(self, _view, track_id: int) -> None:
+        track = database.get_track(track_id)
+        if track is None:
+            return
+        item = QueueItem(
+            track["id"], track["drive_file_id"], track["title"] or track["file_name"], track["artist"],
+            track["album"], track["local_path"], track["duration_seconds"] or 0.0, track["art_path"],
+        )
+        self._queue.set_queue([item], 0)
+        self._playback_bar.play_queue_item(self._queue.current())
+
+    def _on_play_recorded(self, _bar, track_id: int) -> None:
+        database.record_play(track_id)
+        if self._content_stack.get_visible_child_name() == "stats":
+            self._refresh_stats_view()
+
+    def _on_cloud_stats_changed(self, _engine) -> None:
+        # Llegó una reproducción de otro dispositivo por sync en tiempo real — solo
+        # vale la pena refrescar si el usuario está mirando la pantalla ahora mismo.
+        if self._content_stack.get_visible_child_name() == "stats":
+            self._refresh_stats_view()
 
     def _on_cloud_selected(self, _sidebar) -> None:
         self._content_page.set_title("Cuenta / Sync")

@@ -37,7 +37,9 @@ from purrr.cloud import identity
 from purrr.config import SUPABASE_ANON_KEY, SUPABASE_URL
 from purrr.db import database
 
-_SYNCED_TABLES = ("playlists", "playlist_items", "albums", "album_items", "track_moods")
+_SYNCED_TABLES = (
+    "playlists", "playlist_items", "albums", "album_items", "track_moods", "track_plays",
+)
 _FLUSH_INTERVAL_SECONDS = 3
 _RECONNECT_DELAY_SECONDS = 5
 
@@ -71,6 +73,7 @@ class CloudSyncEngine(GObject.Object):
     __gsignals__ = {
         "playlists-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "albums-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "stats-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sync-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
@@ -268,12 +271,24 @@ def _push_track_mood(client, payload: dict) -> None:
     ).execute()
 
 
+def _push_track_play(client, payload: dict) -> None:
+    # Evento append-only: `on_conflict="uuid"` es solo para que un reintento tras un
+    # push que falló a mitad de camino (red caída después del insert remoto, antes de
+    # borrar `pending_sync_ops`) no duplique la reproducción — nunca hay nada que
+    # actualizar en un conflicto real, el evento ya está completo desde que se creó.
+    client.table("track_plays").upsert(
+        {"uuid": payload["uuid"], "track_ref": payload["track_ref"], "played_at": _now_iso()},
+        on_conflict="uuid",
+    ).execute()
+
+
 _PUSH_HANDLERS = {
     "playlists": _push_playlist,
     "playlist_items": _push_playlist_item,
     "albums": _push_album,
     "album_items": _push_album_item,
     "track_moods": _push_track_mood,
+    "track_plays": _push_track_play,
 }
 
 
@@ -497,10 +512,32 @@ def _apply_track_mood(conn, record: dict, engine) -> str | None:
     return None
 
 
+def _apply_track_play(conn, record: dict, engine) -> str | None:
+    """Evento append-only: no hay last-write-wins que resolver, solo evitar duplicar
+    la fila si ya la tenemos (reproducción registrada acá mismo y recibida de vuelta
+    por realtime, o un reintento de push) — de ahí el `INSERT OR IGNORE` por `uuid`."""
+    play_uuid = record.get("uuid")
+    track_ref = record.get("track_ref")
+    if not play_uuid or not track_ref:
+        return None
+    track_id = identity.resolve_local_track_id(track_ref)
+    if track_id is None:
+        # Este dispositivo todavía no escaneó ese archivo de Drive — mismo caso
+        # conocido que el resto de la sync (ver _apply_track_mood).
+        return None
+    conn.execute(
+        "INSERT OR IGNORE INTO track_plays (uuid, track_id, played_at) VALUES (?, ?, ?)",
+        (play_uuid, track_id, record.get("played_at")),
+    )
+    conn.commit()
+    return "stats-changed"
+
+
 _APPLY_HANDLERS = {
     "playlists": _apply_playlist,
     "playlist_items": _apply_playlist_item,
     "albums": _apply_album,
     "album_items": _apply_album_item,
     "track_moods": _apply_track_mood,
+    "track_plays": _apply_track_play,
 }

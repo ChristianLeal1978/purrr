@@ -898,6 +898,53 @@ def list_track_moods() -> list[sqlite3.Row]:
     ).fetchall()
 
 
+# --- Estadísticas (historial de reproducciones) -------------------------
+
+def record_play(track_id: int) -> None:
+    """Suma un evento de reproducción para Estadísticas. Se llama una sola vez por
+    escucha "real" (ver ui/playback_bar.py:_maybe_record_play, umbral de la mitad de
+    la canción o 30s), no en cada click de "reproducir"."""
+    conn = get_connection()
+    play_uuid = str(uuid_lib.uuid4())
+    conn.execute(
+        "INSERT INTO track_plays (uuid, track_id) VALUES (?, ?)", (play_uuid, track_id)
+    )
+    track_row = get_track(track_id)
+    if track_row is not None:
+        _enqueue_sync_op(conn, "track_plays", {"uuid": play_uuid, "track_ref": _track_ref(track_row)})
+    conn.commit()
+
+
+def list_most_played_tracks(limit: int = 50) -> list[sqlite3.Row]:
+    return get_connection().execute(
+        """
+        SELECT t.*, COUNT(tp.id) AS play_count, MAX(tp.played_at) AS last_played_at
+        FROM track_plays tp
+        JOIN tracks t ON t.id = tp.track_id
+        WHERE t.cache_status != 'missing'
+        GROUP BY t.id
+        ORDER BY play_count DESC, last_played_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
+def list_most_played_artists(limit: int = 50) -> list[sqlite3.Row]:
+    return get_connection().execute(
+        """
+        SELECT t.artist AS artist, COUNT(tp.id) AS play_count
+        FROM track_plays tp
+        JOIN tracks t ON t.id = tp.track_id
+        WHERE t.artist IS NOT NULL AND t.artist != '' AND t.cache_status != 'missing'
+        GROUP BY t.artist
+        ORDER BY play_count DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
 # --- Cola de sync (cloud/sync_engine.py) --------------------------------
 
 def list_pending_sync_ops(limit: int = 100) -> list[sqlite3.Row]:

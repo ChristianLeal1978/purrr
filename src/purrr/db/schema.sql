@@ -130,6 +130,21 @@ CREATE TABLE IF NOT EXISTS track_mood (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Historial de reproducciones (Estadísticas: canciones/artistas más escuchados).
+-- Un evento por reproducción, no un contador acumulado — así dos dispositivos que
+-- suman plays offline nunca se pisan un contador entre sí al sincronizar (el push es
+-- un INSERT idempotente por `uuid`, ver cloud/sync_engine.py); "cuántas veces" es un
+-- COUNT(*) al leer (database.list_most_played_tracks/list_most_played_artists).
+CREATE TABLE IF NOT EXISTS track_plays (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid        TEXT NOT NULL UNIQUE,
+    track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    played_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_plays_track      ON track_plays(track_id);
+CREATE INDEX IF NOT EXISTS idx_track_plays_played_at  ON track_plays(played_at);
+
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT
