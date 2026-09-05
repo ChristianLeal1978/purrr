@@ -186,6 +186,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._folder_view.connect("add-folder-to-album-requested", self._on_add_folder_to_album_requested)
 
         self._albums_view.connect("album-activated", self._on_album_activated)
+        self._albums_view.connect("album-selected", self._on_album_selected)
+        self._albums_view.connect("track-activated", self._on_albums_track_activated)
         self._albums_view.connect("album-art-search-requested", self._on_album_art_search_requested)
         self._albums_view.connect("album-rescan-requested", self._on_album_rescan_requested)
         self._albums_view.connect("album-art-upload-requested", self._on_album_art_upload_requested)
@@ -477,6 +479,13 @@ class PurrrWindow(Adw.ApplicationWindow):
         if tracks:
             self._play_from_track_list(tracks, tracks[0].track_id)
 
+    def _on_album_selected(self, _view, album_id: int) -> None:
+        self._albums_view.show_tracks(database.list_album_tracks(album_id))
+
+    def _on_albums_track_activated(self, _view, track_id: int) -> None:
+        tracks = self._albums_view.get_visible_tracks()
+        self._play_from_track_list(tracks, track_id)
+
     # --- Álbumes -----------------------------------------------------------
 
     def _on_add_to_album_requested(self, _view, track_ids) -> None:
@@ -658,6 +667,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._library_view.set_now_playing(item.track_id)
         self._folder_view.set_now_playing(item.track_id)
         self._playlist_view.set_now_playing(item.track_id)
+        self._albums_view.set_now_playing(item.track_id)
         # Fase 5: cada canción de Drive que se reproduce (aunque sea sin pasar por la
         # pantalla "Ánimo" para nada) suma cobertura de análisis de a poco — así no
         # hace falta correr "Analizar biblioteca" para que el modo Ánimo empiece a
