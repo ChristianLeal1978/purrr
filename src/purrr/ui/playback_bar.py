@@ -17,7 +17,7 @@ from purrr.sync.controller import SyncController
 from purrr.ui.textures import load_texture_at_size
 from purrr.ui.waveform_scrubber import WaveformScrubber
 
-_ART_THUMB_SIZE = 72  # ~alto combinado de la columna de texto + controles + onda, a la derecha
+_ART_THUMB_SIZE = 240  # carátula grande, centrada arriba del panel de reproducción
 _ART_EXPANDED_SIZE = 360
 
 
@@ -33,7 +33,7 @@ class PlaybackBar(Gtk.Box):
     }
 
     def __init__(self, engine: PlayerEngine, queue: PlayQueue, sync_controller: SyncController):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.engine = engine
         self.queue = queue
         self._sync_controller = sync_controller
@@ -56,14 +56,9 @@ class PlaybackBar(Gtk.Box):
         self._spotify_controller.connect("no-device", self._on_spotify_no_device)
         self._spotify_controller.connect("error", self._on_spotify_error)
 
-        self.add_css_class("toolbar")
-        self.add_css_class("purrr-playback-card")
-        self.set_margin_top(6)
-        self.set_margin_bottom(6)
-        self.set_margin_start(12)
-        self.set_margin_end(12)
+        self.add_css_class("purrr-player-panel")
 
-        # --- Carátula: a la izquierda, ocupa toda la altura de la barra --------
+        # --- Carátula: grande, centrada arriba del panel -----------------------
         self._current_art_path: str | None = None
 
         self._art_picture = Gtk.Picture(
@@ -71,35 +66,35 @@ class PlaybackBar(Gtk.Box):
         )
         self._art_picture.set_size_request(_ART_THUMB_SIZE, _ART_THUMB_SIZE)
 
-        self._art_button = Gtk.Button(has_frame=False, valign=Gtk.Align.CENTER, tooltip_text="Ver carátula")
+        self._art_button = Gtk.Button(has_frame=False, halign=Gtk.Align.CENTER, tooltip_text="Ver carátula")
         self._art_button.add_css_class("flat")
         self._art_button.add_css_class("purrr-art-rounded")
         self._art_button.set_overflow(Gtk.Overflow.HIDDEN)
         self._art_button.set_child(self._art_picture)
         self._art_button.connect("clicked", self._on_art_clicked)
-        # Siempre visible (aunque el track no tenga carátula) para que la columna de la derecha
+        # Siempre visible (aunque el track no tenga carátula) para que el resto del panel
         # arranque siempre en el mismo lugar — sin imagen, queda como un espacio vacío.
         self._art_button.set_sensitive(False)
         self.append(self._art_button)
 
-        # Una sola fila horizontal (texto | onda | controles | volumen) en vez de dos apiladas —
-        # la barra queda más baja y la onda puede ser más alta dentro de esa única fila.
-        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12, hexpand=True, valign=Gtk.Align.CENTER)
-
-        self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.START, xalign=0)
-        self._title_label.add_css_class("heading")
+        # --- Texto: título y artista, centrados debajo de la carátula ----------
+        self._title_label = Gtk.Label(label="Sin reproducción", halign=Gtk.Align.CENTER, justify=Gtk.Justification.CENTER)
+        self._title_label.add_css_class("title-3")
         self._title_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self._artist_label = Gtk.Label(label="", halign=Gtk.Align.START, xalign=0)
+        self._artist_label = Gtk.Label(label="", halign=Gtk.Align.CENTER, justify=Gtk.Justification.CENTER)
         self._artist_label.add_css_class("dim-label")
         self._artist_label.set_ellipsize(Pango.EllipsizeMode.END)
 
-        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=False)
-        text_box.set_size_request(150, -1)
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, halign=Gtk.Align.CENTER)
         text_box.append(self._title_label)
         text_box.append(self._artist_label)
+        self.append(text_box)
 
+        # --- Barra de progreso (onda + posición/duración) -----------------------
         self._position_label = Gtk.Label(label="0:00")
+        self._position_label.add_css_class("caption")
         self._duration_label = Gtk.Label(label="0:00")
+        self._duration_label.add_css_class("caption")
 
         self._waveform_scrubber = WaveformScrubber()
         self._waveform_scrubber.connect("seek-requested", self._on_scrubber_seek)
@@ -108,14 +103,16 @@ class PlaybackBar(Gtk.Box):
         seek_row.append(self._position_label)
         seek_row.append(self._waveform_scrubber)
         seek_row.append(self._duration_label)
+        self.append(seek_row)
 
-        # --- Controles ------------------------------------------
+        # --- Controles, centrados ------------------------------------------
         self._prev_button = Gtk.Button(icon_name="media-skip-backward-symbolic")
         self._prev_button.connect("clicked", self._on_previous_clicked)
 
         self._play_pause_button = Gtk.Button(icon_name="media-playback-start-symbolic")
         self._play_pause_button.add_css_class("circular")
         self._play_pause_button.add_css_class("purrr-accent-button")
+        self._play_pause_button.add_css_class("purrr-play-button")
         self._play_pause_button.connect("clicked", self._on_play_pause_clicked)
 
         self._next_button = Gtk.Button(icon_name="media-skip-forward-symbolic")
@@ -127,8 +124,17 @@ class PlaybackBar(Gtk.Box):
         self._repeat_button = Gtk.ToggleButton(icon_name="media-playlist-repeat-symbolic")
         self._repeat_button.connect("toggled", self._on_repeat_toggled)
 
+        controls_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10, halign=Gtk.Align.CENTER)
+        controls_row.append(self._shuffle_button)
+        controls_row.append(self._prev_button)
+        controls_row.append(self._play_pause_button)
+        controls_row.append(self._next_button)
+        controls_row.append(self._repeat_button)
+        self.append(controls_row)
+
+        # --- Volumen, al final -----------------------------------------------
         volume_adjustment = Gtk.Adjustment(value=1.0, lower=0.0, upper=1.0, step_increment=0.05)
-        self._volume_button = Gtk.ScaleButton(adjustment=volume_adjustment)
+        self._volume_button = Gtk.ScaleButton(adjustment=volume_adjustment, halign=Gtk.Align.CENTER)
         self._volume_button.set_icons(
             [
                 "audio-volume-muted-symbolic",
@@ -138,19 +144,7 @@ class PlaybackBar(Gtk.Box):
             ]
         )
         self._volume_button.connect("value-changed", self._on_volume_changed)
-
-        controls_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, halign=Gtk.Align.CENTER)
-        controls_row.append(self._shuffle_button)
-        controls_row.append(self._prev_button)
-        controls_row.append(self._play_pause_button)
-        controls_row.append(self._next_button)
-        controls_row.append(self._repeat_button)
-
-        right_box.append(text_box)
-        right_box.append(seek_row)
-        right_box.append(controls_row)
-        right_box.append(self._volume_button)
-        self.append(right_box)
+        self.append(self._volume_button)
 
         self._set_controls_sensitive(False)
 

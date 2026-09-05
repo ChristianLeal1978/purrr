@@ -31,10 +31,22 @@ class Sidebar(Gtk.Box):
     }
 
     def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, css_classes=["purrr-sidebar"])
         self._playlist_row_ids: dict[Gtk.ListBoxRow, int] = {}
 
-        self._list_box = Gtk.ListBox(css_classes=["navigation-sidebar"])
+        brand_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                             margin_top=14, margin_bottom=6, margin_start=8, margin_end=8)
+        brand_box.append(Gtk.Label(label="🐾"))
+        brand_label = Gtk.Label(label="Purrr", halign=Gtk.Align.START)
+        brand_label.add_css_class("purrr-sidebar-brand")
+        brand_box.append(brand_label)
+        self.append(brand_box)
+
+        menu_header = Gtk.Label(label="Menú", halign=Gtk.Align.START)
+        menu_header.add_css_class("purrr-sidebar-section-label")
+        self.append(menu_header)
+
+        self._list_box = Gtk.ListBox(css_classes=["navigation-sidebar", "purrr-sidebar-list"])
         self._list_box.connect("row-activated", self._on_row_activated)
 
         self._library_row = self._make_row("Biblioteca", "audio-x-generic-symbolic")
@@ -63,7 +75,7 @@ class Sidebar(Gtk.Box):
 
         header = Gtk.ListBoxRow(selectable=False, activatable=False)
         header_label = Gtk.Label(label="Playlists", halign=Gtk.Align.START, margin_top=12)
-        header_label.add_css_class("heading")
+        header_label.add_css_class("purrr-sidebar-section-label")
         header.set_child(header_label)
         self._list_box.append(header)
 

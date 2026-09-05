@@ -7,7 +7,7 @@ _BAR_GAP_FRACTION = 0.4  # fracción del ancho de cada franja que queda como esp
 _MIN_BAR_HEIGHT_FRACTION = 0.08
 _MAX_BAR_RADIUS = 1.5
 
-_PLAYED_COLOR = (0.96, 0.75, 0.16, 1.0)
+_PLAYED_COLOR = (0.357, 0.42, 1.0, 1.0)
 _UNPLAYED_COLOR = (1.0, 1.0, 1.0, 0.28)
 _PLACEHOLDER_BARS = [0.15] * 96
 

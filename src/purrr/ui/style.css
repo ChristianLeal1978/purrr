@@ -1,27 +1,178 @@
-.purrr-playback-card {
-    background-color: alpha(@window_bg_color, 0.6);
-    border-radius: 18px;
-    margin: 8px;
-    padding: 6px 10px;
+@define-color purrr_bg #0a0b0f;
+@define-color purrr_surface #15161d;
+@define-color purrr_surface_alt #1c1e28;
+@define-color purrr_accent #5b6bff;
+@define-color purrr_accent_hover #7484ff;
+@define-color purrr_accent_active #4453d8;
+
+/* --- Fondo general de la ventana --------------------------------------- */
+
+window, .background {
+    background-color: @purrr_bg;
+    color: #f3f3fa;
 }
 
-.purrr-accent-button {
-    background-color: #f2c14e;
-    color: #1a1408;
+headerbar.flat {
+    background-color: @purrr_bg;
+    box-shadow: none;
 }
-.purrr-accent-button:hover {
-    background-color: #f6cf72;
+
+/* --- Sidebar ------------------------------------------------------------ */
+
+.purrr-sidebar {
+    background-color: @purrr_surface;
 }
-.purrr-accent-button:active,
-.purrr-accent-button:checked {
-    background-color: #d9a92e;
+
+.purrr-sidebar-brand {
+    font-size: 16pt;
+    font-weight: 800;
+    padding: 4px 8px;
+}
+
+.purrr-sidebar-section-label {
+    font-size: 9pt;
+    font-weight: 700;
+    letter-spacing: 1px;
+    opacity: 0.55;
+    text-transform: uppercase;
+    padding: 4px 8px;
+}
+
+.purrr-sidebar-list {
+    background: transparent;
+}
+
+.purrr-sidebar-list row {
+    border-radius: 10px;
+    margin: 1px 6px;
+    padding: 2px;
+    color: alpha(#fff, 0.75);
+}
+
+.purrr-sidebar-list row:hover {
+    background-color: alpha(#fff, 0.05);
+}
+
+.purrr-sidebar-list row:selected {
+    background-color: alpha(@purrr_accent, 0.22);
+    color: @purrr_accent_hover;
+    font-weight: 600;
+}
+
+/* --- Tarjetas / botones genéricos --------------------------------------- */
+
+.card {
+    background-color: @purrr_surface;
+    box-shadow: none;
+    border-radius: 14px;
+}
+
+.purrr-hero {
+    background-color: @purrr_surface;
+    border-radius: 20px;
+    padding: 20px;
 }
 
 .purrr-art-rounded {
+    border-radius: 12px;
+}
+
+.purrr-avatar-circle {
+    border-radius: 9999px;
+}
+
+.purrr-avatar-fallback {
+    background-color: @purrr_surface_alt;
+    border-radius: 9999px;
+    color: @purrr_accent_hover;
+    font-weight: 700;
+}
+
+.purrr-chip {
+    border-radius: 14px;
+    padding: 10px 14px;
+    color: #ffffff;
+}
+
+.purrr-chip-1 { background-color: #4453d8; }
+.purrr-chip-2 { background-color: #2e7d64; }
+.purrr-chip-3 { background-color: #8a4b2e; }
+.purrr-chip-4 { background-color: #6a3e8f; }
+.purrr-chip-5 { background-color: #1f6f8b; }
+.purrr-chip-6 { background-color: #8f3e5e; }
+
+.purrr-rank-badge {
+    background-color: @purrr_surface_alt;
+    border-radius: 9999px;
+    min-width: 22px;
+    min-height: 22px;
+    color: alpha(#fff, 0.6);
+    font-weight: 700;
+}
+
+.purrr-dashboard-row:hover {
+    background-color: alpha(#fff, 0.04);
     border-radius: 10px;
 }
 
+/* --- Botones de acento --------------------------------------------------- */
+
+.purrr-accent-button {
+    background-color: @purrr_accent;
+    color: #ffffff;
+}
+.purrr-accent-button:hover {
+    background-color: @purrr_accent_hover;
+}
+.purrr-accent-button:active,
+.purrr-accent-button:checked {
+    background-color: @purrr_accent_active;
+}
+
+.purrr-play-button {
+    min-width: 56px;
+    min-height: 56px;
+}
+.purrr-play-button image {
+    -gtk-icon-size: 22px;
+}
+
+/* --- Panel del reproductor ------------------------------------------------ */
+
+.purrr-player-panel {
+    background-color: @purrr_surface;
+    border-radius: 18px;
+    margin: 8px;
+    padding: 18px 16px;
+}
+
 .purrr-now-playing {
-    color: #f2c14e;
+    color: @purrr_accent_hover;
     font-weight: bold;
+}
+
+.purrr-scan-progress {
+    min-height: 3px;
+}
+.purrr-scan-progress trough {
+    min-height: 3px;
+    background-color: @purrr_surface_alt;
+}
+.purrr-scan-progress progress {
+    min-height: 3px;
+    background-color: @purrr_accent;
+}
+
+/* --- Tabla de biblioteca -------------------------------------------------- */
+
+columnview {
+    background-color: transparent;
+}
+
+columnview > header {
+    background-color: @purrr_surface;
+}
+
+columnview row:selected {
+    background-color: alpha(@purrr_accent, 0.22);
 }

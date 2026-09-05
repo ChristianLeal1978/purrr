@@ -226,14 +226,16 @@ def list_pending_tracks(source_id: int) -> list[sqlite3.Row]:
 def list_tracks_needing_metadata(source_id: int, folder_path: str | None = None) -> list[sqlite3.Row]:
     """Tracks sin descargar todavía y sin etiquetas leídas — candidatos para lectura parcial.
 
-    Con `folder_path`, se limita a esa carpeta puntual (no recursivo) en vez de toda la fuente.
+    Con `folder_path`, se limita a esa carpeta Y sus subcarpetas (leer etiquetas desde una
+    carpeta padre también lee las de sus discos/subcarpetas) en vez de toda la fuente.
     """
     conn = get_connection()
     if folder_path is not None:
+        prefix = folder_path.rstrip("/") + "/%"
         return conn.execute(
-            "SELECT * FROM tracks WHERE source_id = ? AND drive_folder_path = ? "
-            "AND cache_status = 'pending' AND title IS NULL ORDER BY file_name",
-            (source_id, folder_path),
+            "SELECT * FROM tracks WHERE source_id = ? AND (drive_folder_path = ? OR drive_folder_path LIKE ?) "
+            "AND cache_status = 'pending' AND title IS NULL ORDER BY drive_folder_path, file_name",
+            (source_id, folder_path, prefix),
         ).fetchall()
     return conn.execute(
         "SELECT * FROM tracks WHERE source_id = ? AND cache_status = 'pending' AND title IS NULL "
@@ -375,9 +377,9 @@ def list_tracks(filter_text: str | None = None) -> list[sqlite3.Row]:
         like = f"%{filter_text}%"
         return conn.execute(
             "SELECT * FROM tracks WHERE cache_status != 'missing' AND "
-            "(title LIKE ? OR artist LIKE ? OR album LIKE ?) "
+            "(title LIKE ? OR artist LIKE ? OR album LIKE ? OR genre LIKE ?) "
             "ORDER BY artist, album, disc_number, track_number, title",
-            (like, like, like),
+            (like, like, like, like),
         ).fetchall()
     return conn.execute(
         "SELECT * FROM tracks WHERE cache_status != 'missing' "

@@ -69,7 +69,7 @@ class FolderBrowserView(Gtk.Box):
     }
 
     def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0, vexpand=True)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0, vexpand=True)
         self._tracks: list[TrackObject] = []
         self._current_node: FolderNode | None = None
         self._now_playing_track_id: int | None = None
@@ -89,36 +89,18 @@ class FolderBrowserView(Gtk.Box):
         tree_factory.connect("bind", self._on_tree_bind)
 
         tree_view = Gtk.ListView(model=self._tree_selection, factory=tree_factory)
-        tree_scrolled = Gtk.ScrolledWindow(vexpand=True, hexpand=False)
+        tree_scrolled = Gtk.ScrolledWindow(vexpand=False, hexpand=True)
         tree_scrolled.set_child(tree_view)
-        tree_scrolled.set_size_request(160, -1)
+        tree_scrolled.set_size_request(-1, 220)
 
         right_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=6, hexpand=True,
-            margin_start=12, margin_top=6, margin_end=6,
+            margin_start=12, margin_top=12, margin_end=12,
         )
-        right_box.set_size_request(300, -1)
-        header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._breadcrumb = Gtk.Label(
-            label="Elige una carpeta a la izquierda", halign=Gtk.Align.START, xalign=0, hexpand=True
-        )
-        self._breadcrumb.add_css_class("heading")
-        header_row.append(self._breadcrumb)
 
-        self._scan_button = Gtk.Button(
-            icon_name="text-x-generic-symbolic",
-            valign=Gtk.Align.CENTER,
-            sensitive=False,
-            tooltip_text="Leer etiquetas (título/artista/álbum) de esta carpeta, sin descargar "
-            "el audio completo",
-        )
-        self._scan_button.connect("clicked", self._on_scan_clicked)
-        header_row.append(self._scan_button)
-        right_box.append(header_row)
-
-        self._status_label = Gtk.Label(halign=Gtk.Align.START, xalign=0, visible=False)
-        self._status_label.add_css_class("dim-label")
-        right_box.append(self._status_label)
+        self._scan_progress_bar = Gtk.ProgressBar(visible=False)
+        self._scan_progress_bar.add_css_class("purrr-scan-progress")
+        right_box.append(self._scan_progress_bar)
 
         self._track_store = Gio.ListStore(item_type=TrackObject)
         self._track_sort_model = Gtk.SortListModel(model=self._track_store)
@@ -158,14 +140,14 @@ class FolderBrowserView(Gtk.Box):
         track_scrolled.set_child(self._track_view)
         right_box.append(track_scrolled)
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True, wide_handle=True)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, wide_handle=True)
         paned.set_start_child(tree_scrolled)
         paned.set_resize_start_child(False)
         paned.set_shrink_start_child(False)
         paned.set_end_child(right_box)
         paned.set_resize_end_child(True)
         paned.set_shrink_end_child(False)
-        paned.set_position(260)
+        paned.set_position(220)
         self.append(paned)
 
     def refresh(self, sources: list[sqlite3.Row]) -> None:
@@ -173,8 +155,6 @@ class FolderBrowserView(Gtk.Box):
         self._current_node = None
         self._track_store.remove_all()
         self._tracks = []
-        self._scan_button.set_sensitive(False)
-        self._breadcrumb.set_label("Elige una carpeta a la izquierda")
 
     def get_visible_tracks(self) -> list[TrackObject]:
         """Tracks tal como se ven ahora (respetando el orden de columna que haya elegido el
@@ -247,13 +227,10 @@ class FolderBrowserView(Gtk.Box):
 
     def _show_folder(self, node: FolderNode) -> None:
         self._current_node = node
-        self._scan_button.set_sensitive(True)
         track_rows = database.list_tracks_in_folder(node.source_id, node.path)
         self._tracks = [TrackObject(row) for row in track_rows]
         self._track_store.splice(0, self._track_store.get_n_items(), self._tracks)
         apply_now_playing(self._track_store, self._now_playing_track_id)
-        cancion_palabra = "canción" if len(self._tracks) == 1 else "canciones"
-        self._breadcrumb.set_label(f"{node.display_path}  ·  {len(self._tracks)} {cancion_palabra}")
         database.set_state("last_folder_source_id", str(node.source_id))
         database.set_state("last_folder_path", node.path)
 
@@ -273,19 +250,22 @@ class FolderBrowserView(Gtk.Box):
         node: FolderNode = row.get_item()
         show_context_menu(
             widget, x, y,
-            [(
-                "Agregar a álbumes",
-                lambda: self.emit("add-folder-to-album-requested", node.source_id, node.path),
-            )],
+            [
+                (
+                    "Agregar a álbumes",
+                    lambda: self.emit("add-folder-to-album-requested", node.source_id, node.path),
+                ),
+                (
+                    "Leer etiquetas (incluye subcarpetas)",
+                    lambda: self.emit("scan-folder-requested", node.source_id, node.path),
+                ),
+            ],
         )
 
-    def _on_scan_clicked(self, _button) -> None:
-        if self._current_node is not None:
-            self.emit("scan-folder-requested", self._current_node.source_id, self._current_node.path)
-
-    def show_scan_progress(self, stage: str) -> None:
-        self._status_label.set_text(stage)
-        self._status_label.set_visible(True)
+    def show_scan_progress(self, actual: int, total: int) -> None:
+        self._scan_progress_bar.set_fraction(actual / total if total else 0.0)
+        self._scan_progress_bar.set_visible(True)
 
     def hide_scan_progress(self) -> None:
-        self._status_label.set_visible(False)
+        self._scan_progress_bar.set_visible(False)
+

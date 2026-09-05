@@ -57,7 +57,7 @@ def _folder_name(folder_path: str | None) -> str | None:
 class PurrrWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.set_default_size(1100, 750)
+        self.set_default_size(1280, 800)
         self.set_title("Purrr")
 
         self._engine = PlayerEngine()
@@ -115,13 +115,24 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._content_page = content_page
 
         split_view = Adw.NavigationSplitView(sidebar=sidebar_page, content=content_page)
+        split_view.set_hexpand(True)
 
         header_bar = Adw.HeaderBar()
+        header_bar.add_css_class("flat")
+
+        # El panel de reproducción vive como columna fija a la derecha (estilo "Player"
+        # del mockup de referencia), no como barra angosta arriba del contenido.
+        self._playback_bar.set_size_request(320, -1)
+        self._playback_bar.set_hexpand(False)
+        self._playback_bar.set_vexpand(True)
+
+        body_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        body_box.append(split_view)
+        body_box.append(self._playback_bar)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
-        toolbar_view.add_top_bar(self._playback_bar)
-        toolbar_view.set_content(split_view)
+        toolbar_view.set_content(body_box)
 
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(toolbar_view)
@@ -631,7 +642,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
     def _on_sync_progress(self, _controller, stage: str, actual: int, total: int) -> None:
         self._sources_view.show_progress(stage, actual, total)
-        self._folder_view.show_scan_progress(stage)
+        self._folder_view.show_scan_progress(actual, total)
 
     def _on_sync_finished(self, _controller, total: int) -> None:
         self._sources_view.hide_progress()

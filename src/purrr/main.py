@@ -19,6 +19,7 @@ class PurrrApplication(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
         css = resources.files("purrr.ui").joinpath("style.css").read_text()
         provider = Gtk.CssProvider()
         provider.load_from_string(css)
