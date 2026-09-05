@@ -763,7 +763,7 @@ class PurrrWindow(Adw.ApplicationWindow):
                     # Proyecto Supabase con "Confirm email" activo: la cuenta se crea pero
                     # no hay sesión hasta que el usuario confirme desde su correo (la foto
                     # se sube recién en el próximo login, ya con sesión).
-                    GLib.idle_add(self._on_cloud_signup_pending)
+                    GLib.idle_add(self._on_cloud_signup_pending, email)
             except Exception as exc:  # noqa: BLE001 — se reporta a la UI
                 verb = "crear la cuenta" if signing_up else "iniciar sesión"
                 GLib.idle_add(self._toast, f"No se pudo {verb}: {exc}")
@@ -777,8 +777,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._toast("Cuenta creada — sincronizando." if signing_up else "Sesión iniciada — sincronizando.")
         return False
 
-    def _on_cloud_signup_pending(self) -> bool:
-        self._toast("Cuenta creada. Revisa tu correo para confirmarla antes de iniciar sesión.")
+    def _on_cloud_signup_pending(self, email: str) -> bool:
+        self._cloud_settings_view.show_signup_pending(email)
         return False
 
     def _on_sign_out_requested(self, _view) -> None:
