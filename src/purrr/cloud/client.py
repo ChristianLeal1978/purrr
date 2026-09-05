@@ -7,7 +7,9 @@ que loguearse de nuevo en cada arranque de la app.
 """
 
 import json
+import mimetypes
 import os
+from pathlib import Path
 
 from supabase import Client as SupabaseClient
 from supabase import create_client
@@ -16,6 +18,7 @@ from supabase_auth.types import AuthResponse
 from purrr.config import SUPABASE_ANON_KEY, SUPABASE_SESSION_PATH, SUPABASE_URL
 
 _client: SupabaseClient | None = None
+_AVATAR_BUCKET = "avatars"
 
 
 def get_client() -> SupabaseClient:
@@ -61,10 +64,41 @@ def _persist_session(response: AuthResponse) -> None:
     os.chmod(SUPABASE_SESSION_PATH, 0o600)
 
 
-def sign_up(email: str, password: str) -> AuthResponse:
-    response = get_client().auth.sign_up({"email": email, "password": password})
+def sign_up(email: str, password: str, name: str | None = None) -> AuthResponse:
+    payload: dict = {"email": email, "password": password}
+    if name:
+        payload["options"] = {"data": {"full_name": name}}
+    response = get_client().auth.sign_up(payload)
     _persist_session(response)
     return response
+
+
+def upload_avatar(local_path: str) -> str:
+    """Sube la foto de perfil elegida al crear la cuenta (opcional — sin ella, la UI
+    muestra las iniciales del nombre vía Adw.Avatar, ver ui/cloud_settings.py) y la
+    deja referenciada en user_metadata.avatar_url. Requiere sesión activa."""
+    client = get_client()
+    session = client.auth.get_session()
+    if session is None:
+        raise RuntimeError("no hay sesión activa")
+    path = Path(local_path)
+    ext = path.suffix or ".jpg"
+    storage_path = f"{session.user.id}{ext}"
+    content_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    client.storage.from_(_AVATAR_BUCKET).upload(
+        storage_path, path.read_bytes(), {"content-type": content_type, "upsert": "true"}
+    )
+    client.auth.update_user({"data": {"avatar_url": storage_path}})
+    return storage_path
+
+
+def download_avatar(storage_path: str) -> bytes | None:
+    """Baja los bytes de la foto de perfil (ver `upload_avatar`); None si no hay
+    conexión o el archivo ya no está — nunca debe romper la UI, que cae a iniciales."""
+    try:
+        return get_client().storage.from_(_AVATAR_BUCKET).download(storage_path)
+    except Exception:
+        return None
 
 
 def sign_in(email: str, password: str) -> AuthResponse:

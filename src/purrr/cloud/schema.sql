@@ -132,6 +132,24 @@ create policy "covers_authenticated_all" on storage.objects
     for all using (bucket_id = 'covers' and auth.role() = 'authenticated')
     with check (bucket_id = 'covers' and auth.role() = 'authenticated');
 
+-- --- Foto de perfil (opcional, Fase 1.5) ----------------------------------
+-- Bucket privado para la foto que el usuario puede elegir al crear la cuenta
+-- (cloud/client.py:upload_avatar/download_avatar). Sin foto, la UI usa las
+-- iniciales del nombre (Adw.Avatar en ui/cloud_settings.py) — nunca se bloquea
+-- la creación de cuenta por esto.
+--
+-- A diferencia de 'covers' (compartido entre todos los autenticados a propósito:
+-- carátulas de álbum no son datos privados), acá cada archivo se llama
+-- "<uuid-del-usuario>.<ext>" (ver upload_avatar) y la política solo deja tocar el
+-- que coincide con el propio auth.uid() — nadie ve ni pisa la foto de otro.
+
+insert into storage.buckets (id, name, public) values ('avatars', 'avatars', false)
+    on conflict (id) do nothing;
+
+create policy "avatars_owner_all" on storage.objects
+    for all using (bucket_id = 'avatars' and auth.uid()::text = split_part(name, '.', 1))
+    with check (bucket_id = 'avatars' and auth.uid()::text = split_part(name, '.', 1));
+
 -- --- Realtime ------------------------------------------------------------
 -- Habilita que INSERT/UPDATE/DELETE en estas tablas se transmitan por WebSocket a
 -- los clientes suscriptos (cloud/sync_engine.py) — no incluye credential_vault, que

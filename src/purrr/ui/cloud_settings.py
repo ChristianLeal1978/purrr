@@ -2,7 +2,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GObject, Gtk
+from gi.repository import Adw, Gdk, GLib, GObject, Gtk
 
 from purrr.ui.markup import escape
 
@@ -18,8 +18,12 @@ class CloudSettingsView(Gtk.Box):
 
     __gsignals__ = {
         "sign-in-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
-        "sign-up-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
+        # avatar_path va vacío ("") cuando no se eligió foto — Adw.Avatar ya resuelve
+        # las iniciales solo, así que el backend no recibe None por un tipo de señal
+        # que no admite Optional[str].
+        "sign-up-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, str, str, str)),
         "sign-out-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "avatar-upload-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self):
@@ -55,8 +59,34 @@ class CloudSettingsView(Gtk.Box):
         )
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.CENTER)
         box.set_size_request(320, -1)
+
+        # Foto opcional (solo para "Crear cuenta"): sin ella, Adw.Avatar cae solo a
+        # las iniciales del texto que le demos (ver _sync_avatar_initials), no hace
+        # falta calcularlas a mano.
+        self._avatar_path: str | None = None
+        self._avatar_widget = Adw.Avatar(size=64, show_initials=True, halign=Gtk.Align.CENTER)
+        avatar_button = Gtk.Button(
+            label="Elegir foto…", halign=Gtk.Align.CENTER, css_classes=["flat"]
+        )
+        avatar_button.connect("clicked", lambda _b: self.emit("avatar-upload-requested"))
+        self._avatar_remove_button = Gtk.Button(
+            label="Quitar foto", halign=Gtk.Align.CENTER, css_classes=["flat"], visible=False
+        )
+        self._avatar_remove_button.connect("clicked", lambda _b: self.set_avatar_photo(None))
+        avatar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, halign=Gtk.Align.CENTER)
+        avatar_box.append(self._avatar_widget)
+        avatar_box.append(avatar_button)
+        avatar_box.append(self._avatar_remove_button)
+
+        # El nombre solo lo pide "Crear cuenta" (se guarda como user_metadata en
+        # Supabase Auth); "Iniciar sesión" lo ignora.
+        self._name_entry = Gtk.Entry(placeholder_text="Nombre (solo para crear cuenta)")
+        self._name_entry.connect("changed", self._on_name_changed)
         self._email_entry = Gtk.Entry(placeholder_text="email@ejemplo.com")
         self._password_entry = Gtk.Entry(placeholder_text="Contraseña", visibility=False)
+        self._error_label = Gtk.Label(
+            label="", halign=Gtk.Align.START, css_classes=["error"], wrap=True, visible=False
+        )
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.CENTER)
         sign_in_button = Gtk.Button(label="Iniciar sesión", css_classes=["suggested-action", "pill"])
         sign_in_button.connect("clicked", self._on_sign_in_clicked)
@@ -64,8 +94,11 @@ class CloudSettingsView(Gtk.Box):
         sign_up_button.connect("clicked", self._on_sign_up_clicked)
         button_box.append(sign_in_button)
         button_box.append(sign_up_button)
+        box.append(avatar_box)
+        box.append(self._name_entry)
         box.append(self._email_entry)
         box.append(self._password_entry)
+        box.append(self._error_label)
         box.append(button_box)
         self._login_page.set_child(box)
         self._content.append(self._login_page)
@@ -73,23 +106,60 @@ class CloudSettingsView(Gtk.Box):
     def _credentials(self) -> tuple[str, str]:
         return self._email_entry.get_text().strip(), self._password_entry.get_text()
 
+    def _show_error(self, text: str) -> None:
+        self._error_label.set_label(text)
+        self._error_label.set_visible(True)
+
+    def _on_name_changed(self, _entry) -> None:
+        # Solo actualiza las iniciales cuando no hay foto elegida — con foto, el
+        # nombre no debe pisar la vista previa de la imagen.
+        if self._avatar_path is None:
+            self._avatar_widget.set_text(self._name_entry.get_text().strip())
+
+    def set_avatar_photo(self, path: str | None) -> None:
+        """Fija (o quita, con path=None) la foto elegida para la cuenta nueva. Si falla
+        la carga de la imagen, cae a las iniciales — nunca bloquea crear la cuenta."""
+        if path is None:
+            self._avatar_path = None
+            self._avatar_widget.set_custom_image(None)
+            self._avatar_remove_button.set_visible(False)
+            self._avatar_widget.set_text(self._name_entry.get_text().strip())
+            return
+        try:
+            texture = Gdk.Texture.new_from_filename(path)
+        except GLib.Error:
+            self._show_error("No se pudo cargar esa imagen — se usarán las iniciales.")
+            return
+        self._avatar_path = path
+        self._avatar_widget.set_custom_image(texture)
+        self._avatar_remove_button.set_visible(True)
+
     def _on_sign_in_clicked(self, _button) -> None:
         email, password = self._credentials()
-        if email and password:
-            self.emit("sign-in-requested", email, password)
+        if not email or not password:
+            self._show_error("Ingresa tu email y contraseña.")
+            return
+        self._error_label.set_visible(False)
+        self.emit("sign-in-requested", email, password)
 
     def _on_sign_up_clicked(self, _button) -> None:
+        name = self._name_entry.get_text().strip()
         email, password = self._credentials()
-        if email and password:
-            self.emit("sign-up-requested", email, password)
+        if not name or not email or not password:
+            self._show_error("Completa nombre, email y contraseña para crear la cuenta.")
+            return
+        self._error_label.set_visible(False)
+        self.emit("sign-up-requested", name, email, password, self._avatar_path or "")
 
     # --- Estado conectado ----------------------------------------------------
 
     def _build_connected_step(self) -> None:
         self._connected_row = Adw.ActionRow(title="Conectado")
+        self._connected_avatar = Adw.Avatar(size=40, show_initials=True)
         self._status_label = Gtk.Label(label="", css_classes=["dim-label"])
         sign_out_button = Gtk.Button(label="Cerrar sesión", valign=Gtk.Align.CENTER)
         sign_out_button.connect("clicked", lambda _b: self.emit("sign-out-requested"))
+        self._connected_row.add_prefix(self._connected_avatar)
         self._connected_row.add_suffix(self._status_label)
         self._connected_row.add_suffix(sign_out_button)
         self._connected_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["boxed-list"])
@@ -125,13 +195,43 @@ class CloudSettingsView(Gtk.Box):
 
     # --- Estado visible --------------------------------------------------------
 
-    def set_logged_in(self, logged_in: bool, email: str | None) -> None:
+    def set_logged_in(
+        self,
+        logged_in: bool,
+        email: str | None,
+        name: str | None = None,
+        avatar_bytes: bytes | None = None,
+    ) -> None:
         self._login_page.set_visible(not logged_in)
         self._connected_box.set_visible(logged_in)
         self._log_header.set_visible(logged_in)
         self._log_scrolled.set_visible(logged_in)
         if logged_in:
             self._connected_row.set_title(escape(email) if email else "Conectado")
+            self._connected_avatar.set_text(name or email or "")
+            self.set_connected_avatar(avatar_bytes)
+        else:
+            self.reset_login_form()
+
+    def set_connected_avatar(self, avatar_bytes: bytes | None) -> None:
+        """La foto de perfil se baja aparte (red) — ver window.py:_refresh_cloud_settings_view
+        — así que llega después de que `set_logged_in` ya mostró las iniciales."""
+        texture = None
+        if avatar_bytes:
+            try:
+                texture = Gdk.Texture.new_from_bytes(GLib.Bytes.new(avatar_bytes))
+            except GLib.Error:
+                texture = None
+        self._connected_avatar.set_custom_image(texture)
+
+    def reset_login_form(self) -> None:
+        """Limpia el formulario de login/registro — se llama tras autenticar y al
+        cerrar sesión, para que la próxima vez no arrastre datos de la cuenta anterior."""
+        self._name_entry.set_text("")
+        self._email_entry.set_text("")
+        self._password_entry.set_text("")
+        self._error_label.set_visible(False)
+        self.set_avatar_photo(None)
 
     def set_status(self, text: str) -> None:
         self._status_label.set_label(text)

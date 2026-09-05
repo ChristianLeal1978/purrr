@@ -197,6 +197,7 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._cloud_settings_view.connect("sign-in-requested", self._on_sign_in_requested)
         self._cloud_settings_view.connect("sign-up-requested", self._on_sign_up_requested)
+        self._cloud_settings_view.connect("avatar-upload-requested", self._on_avatar_upload_requested)
         self._cloud_settings_view.connect("sign-out-requested", self._on_sign_out_requested)
 
         self._cloud_sync_engine.connect("playlists-changed", self._on_cloud_playlists_changed)
@@ -684,38 +685,100 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _refresh_cloud_settings_view(self) -> None:
         logged_in = cloud_client.is_logged_in_locally()
         email = None
+        name = None
+        avatar_storage_path = None
         if logged_in:
             try:
                 session = cloud_client.get_client().auth.get_session()
                 email = session.user.email if session else None
+                metadata = session.user.user_metadata if session else {}
+                name = metadata.get("full_name")
+                avatar_storage_path = metadata.get("avatar_url")
             except Exception:  # noqa: BLE001 — sesión guardada corrupta/expirada
                 logged_in = False
-        self._cloud_settings_view.set_logged_in(logged_in, email)
+        self._cloud_settings_view.set_logged_in(logged_in, email, name)
+        if logged_in and avatar_storage_path:
+            self._load_connected_avatar(avatar_storage_path)
 
-    def _on_sign_in_requested(self, _view, email: str, password: str) -> None:
-        self._do_cloud_auth(cloud_client.sign_in, email, password)
-
-    def _on_sign_up_requested(self, _view, email: str, password: str) -> None:
-        self._do_cloud_auth(cloud_client.sign_up, email, password)
-
-    def _do_cloud_auth(self, action, email: str, password: str) -> None:
+    def _load_connected_avatar(self, storage_path: str) -> None:
         def worker() -> None:
-            try:
-                action(email, password)
-                # La bóveda se desbloquea con la MISMA contraseña recién ingresada (nunca
-                # viaja a Supabase, ver cloud/vault.py) y trae Drive/etc. ya conectados.
-                cloud_vault.sync_after_login(password, email)
-                GLib.idle_add(self._on_cloud_signed_in)
-            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
-                GLib.idle_add(self._toast, f"No se pudo iniciar sesión: {exc}")
+            data = cloud_client.download_avatar(storage_path)
+            if data is not None:
+                GLib.idle_add(self._cloud_settings_view.set_connected_avatar, data)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_cloud_signed_in(self) -> bool:
+    def _on_sign_in_requested(self, _view, email: str, password: str) -> None:
+        self._do_cloud_auth(lambda: cloud_client.sign_in(email, password), email, password, signing_up=False)
+
+    def _on_sign_up_requested(self, _view, name: str, email: str, password: str, avatar_path: str) -> None:
+        self._do_cloud_auth(
+            lambda: cloud_client.sign_up(email, password, name),
+            email,
+            password,
+            signing_up=True,
+            avatar_path=avatar_path or None,
+        )
+
+    def _on_avatar_upload_requested(self, _view) -> None:
+        image_filter = Gtk.FileFilter(name="Imágenes")
+        image_filter.add_mime_type("image/jpeg")
+        image_filter.add_mime_type("image/png")
+        image_filter.add_mime_type("image/webp")
+        image_filter.add_mime_type("image/gif")
+        filters = Gio.ListStore(item_type=Gtk.FileFilter)
+        filters.append(image_filter)
+        dialog = Gtk.FileDialog(title="Elegir foto de perfil", filters=filters, default_filter=image_filter)
+
+        def on_open_finished(dlg, result) -> None:
+            try:
+                gfile = dlg.open_finish(result)
+            except GLib.Error:
+                return  # el usuario canceló el diálogo
+            path = gfile.get_path()
+            if path:
+                self._cloud_settings_view.set_avatar_photo(path)
+
+        dialog.open(self, None, on_open_finished)
+
+    def _do_cloud_auth(
+        self, action, email: str, password: str, signing_up: bool, avatar_path: str | None = None
+    ) -> None:
+        def worker() -> None:
+            try:
+                response = action()
+                if response.session is not None:
+                    # La bóveda se desbloquea con la MISMA contraseña recién ingresada (nunca
+                    # viaja a Supabase, ver cloud/vault.py) y trae Drive/etc. ya conectados.
+                    cloud_vault.sync_after_login(password, email)
+                    if avatar_path:
+                        try:
+                            cloud_client.upload_avatar(avatar_path)
+                        except Exception as exc:  # noqa: BLE001 — la foto es opcional
+                            GLib.idle_add(
+                                self._toast, f"Cuenta creada, pero no se pudo subir la foto: {exc}"
+                            )
+                    GLib.idle_add(self._on_cloud_signed_in, signing_up)
+                else:
+                    # Proyecto Supabase con "Confirm email" activo: la cuenta se crea pero
+                    # no hay sesión hasta que el usuario confirme desde su correo (la foto
+                    # se sube recién en el próximo login, ya con sesión).
+                    GLib.idle_add(self._on_cloud_signup_pending)
+            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
+                verb = "crear la cuenta" if signing_up else "iniciar sesión"
+                GLib.idle_add(self._toast, f"No se pudo {verb}: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_cloud_signed_in(self, signing_up: bool = False) -> bool:
         self._refresh_cloud_settings_view()
         self._sources_view.set_authenticated(is_authenticated())
         self._cloud_sync_engine.start()
-        self._toast("Sesión iniciada — sincronizando.")
+        self._toast("Cuenta creada — sincronizando." if signing_up else "Sesión iniciada — sincronizando.")
+        return False
+
+    def _on_cloud_signup_pending(self) -> bool:
+        self._toast("Cuenta creada. Revisa tu correo para confirmarla antes de iniciar sesión.")
         return False
 
     def _on_sign_out_requested(self, _view) -> None:
