@@ -43,11 +43,22 @@ class _StationTile(Gtk.Button):
         self.slug = station.slug
         self.connect("clicked", lambda _b, s=station: emitter.emit("station-activated", s))
 
-        self._art = Gtk.Overlay(css_classes=["purrr-station-tile-art"])
+        # halign/valign=CENTER + sin hexpand/vexpand: sin esto, el FlowBox (que
+        # reparte a todas las celdas el ancho de la más ancha, por el
+        # `homogeneous=True`, y esas anchuras varían con el largo del nombre del
+        # canal) estira este Overlay horizontalmente y el cuadrado termina
+        # rectangular — con esto se queda siempre en _TILE_SIZE x _TILE_SIZE,
+        # centrado, sin importar cuánto más ancha sea la celda.
+        self._art = Gtk.Overlay(
+            css_classes=["purrr-station-tile-art"],
+            halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, hexpand=False, vexpand=False,
+        )
         self._art.set_overflow(Gtk.Overflow.HIDDEN)
         self._art.set_size_request(_TILE_SIZE, _TILE_SIZE)
 
-        self._picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        self._picture = Gtk.Picture(
+            content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True
+        )
         self._art.set_child(self._picture)
 
         self._fallback_icon = Gtk.Image(
@@ -55,10 +66,13 @@ class _StationTile(Gtk.Button):
         )
         self._art.add_overlay(self._fallback_icon)
 
-        self._scrim = Gtk.Box(css_classes=["purrr-station-tile-scrim"], visible=False)
+        self._scrim = Gtk.Box(
+            css_classes=["purrr-station-tile-scrim"], visible=False,
+            halign=Gtk.Align.FILL, valign=Gtk.Align.FILL,
+        )
         self._scrim.append(
             Gtk.Image(icon_name="media-playback-start-symbolic", pixel_size=36,
-                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, hexpand=True, vexpand=True)
         )
         self._art.add_overlay(self._scrim)
 
