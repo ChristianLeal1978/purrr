@@ -10,10 +10,16 @@ from purrr.ui.markup import escape
 _MAX_LOG_LINES = 20
 
 
-class SpotifyView(Gtk.Box):
+class SpotifyView(Gtk.ScrolledWindow):
     """Pantalla 'Spotify': conectar la cuenta (PKCE, sin contraseña que pasar por acá)
     y buscar canciones para reproducir por Spotify Connect o agregar a una playlist
-    mixta. Mismo estilo que `ui/first_run.py`/`ui/cloud_settings.py`."""
+    mixta. Mismo estilo que `ui/first_run.py`/`ui/cloud_settings.py`.
+
+    Envuelta en un ScrolledWindow (a diferencia de esas otras dos): sin conexión Spotify
+    Connect, la lista de dispositivos queda vacía y el contenido es corto, pero con la
+    ventana achicada o varios resultados de búsqueda el bloque entero (client ID + login +
+    búsqueda + dispositivos) puede superar el alto disponible — antes quedaba cortado
+    abajo sin ninguna forma de bajar a ver el resto."""
 
     __gsignals__ = {
         "client-id-save-requested": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
@@ -24,11 +30,12 @@ class SpotifyView(Gtk.Box):
     }
 
     def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        self.set_margin_top(24)
-        self.set_margin_bottom(24)
-        self.set_margin_start(24)
-        self.set_margin_end(24)
+        super().__init__(vexpand=True)
+        self._box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        self.set_child(self._box)
 
         self._build_client_id_step()
         self._build_connect_step()
@@ -62,7 +69,7 @@ class SpotifyView(Gtk.Box):
         box.append(self._client_id_entry)
         box.append(save_button)
         self._client_id_page.set_child(box)
-        self.append(self._client_id_page)
+        self._box.append(self._client_id_page)
 
     # --- Paso 2: login PKCE -----------------------------------------------
 
@@ -78,7 +85,7 @@ class SpotifyView(Gtk.Box):
         )
         connect_button.connect("clicked", lambda _b: self.emit("connect-requested"))
         self._connect_page.set_child(connect_button)
-        self.append(self._connect_page)
+        self._box.append(self._connect_page)
 
     # --- Paso 3: búsqueda -----------------------------------------------------
 
@@ -92,7 +99,7 @@ class SpotifyView(Gtk.Box):
         scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=240)
         scrolled.set_child(self._results_list)
         self._search_box.append(scrolled)
-        self.append(self._search_box)
+        self._box.append(self._search_box)
 
     def show_results(self, tracks: list[SpotifyTrack]) -> None:
         while row := self._results_list.get_row_at_index(0):
@@ -121,8 +128,8 @@ class SpotifyView(Gtk.Box):
         )
         self._devices_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self._devices_header = header
-        self.append(header)
-        self.append(self._devices_box)
+        self._box.append(header)
+        self._box.append(self._devices_box)
 
     def show_devices(self, devices: list[dict]) -> None:
         while child := self._devices_box.get_first_child():
