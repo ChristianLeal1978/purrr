@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 import urllib.parse
 from pathlib import Path
@@ -252,6 +253,9 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _reload_all(self) -> None:
         self._library_view.refresh(database.list_tracks())
         self._folder_view.refresh(database.list_sources())
+        # Corrige, si hace falta, álbumes que un bug ya arreglado partió en uno por artista
+        # de pista (ver `_add_tracks_to_album_by_metadata`) — no-op si no hay duplicados.
+        database.merge_duplicate_albums()
         self._albums_view.refresh(database.list_albums())
         self._sidebar.refresh_playlists(database.list_playlists())
         self._sources_view.refresh_sources(database.list_sources())
@@ -504,29 +508,34 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._add_tracks_to_album_by_metadata([t["id"] for t in tracks])
 
     def _add_tracks_to_album_by_metadata(self, track_ids: list[int]) -> None:
-        """El nombre (y artista) del álbum sale de la etiqueta `album` de cada canción — no se
-        le pregunta nada al usuario. Si las canciones traen álbumes distintos (p. ej. una
-        carpeta con varios discos de álbumes distintos), cada una va al álbum que le corresponde
-        según su propia etiqueta."""
+        """El nombre del álbum sale de la etiqueta `album` de cada canción — no se le pregunta
+        nada al usuario. Se agrupa por (álbum, album_artist) y nunca por el artista de cada
+        pista: una compilación (soundtrack, tributo) trae un artista distinto por canción y
+        sigue siendo un solo álbum — agrupar por artista de pista partía ese álbum en uno por
+        canción. El artista que se guarda para la tarjeta sale del `album_artist` común si lo
+        hay, o de "Varios artistas" cuando las pistas del grupo no comparten uno."""
         if not track_ids:
             return
 
-        groups: dict[tuple[str, str | None], list[int]] = {}
+        groups: dict[tuple[str, str | None], list[sqlite3.Row]] = {}
         for track_id in track_ids:
             track = database.get_track(track_id)
             if track is None:
                 continue
             name = track["album"] or _folder_name(track["drive_folder_path"]) or "Álbum desconocido"
-            artist = track["album_artist"] or track["artist"]
-            groups.setdefault((name, artist), []).append(track_id)
+            groups.setdefault((name, track["album_artist"]), []).append(track)
 
         if not groups:
             return
 
         total_added = 0
-        for (name, artist), ids in groups.items():
-            album_id = database.get_or_create_album(name, artist)
-            total_added += database.add_tracks_to_album(album_id, ids)
+        for (name, album_artist), tracks in groups.items():
+            track_artists = {t["artist"] for t in tracks if t["artist"]}
+            display_artist = album_artist or (
+                track_artists.pop() if len(track_artists) == 1 else "Varios artistas"
+            )
+            album_id = database.get_or_create_album(name, display_artist)
+            total_added += database.add_tracks_to_album(album_id, [t["id"] for t in tracks])
 
         self._albums_view.refresh(database.list_albums())
         cancion_palabra = "canción" if total_added == 1 else "canciones"

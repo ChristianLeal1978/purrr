@@ -529,6 +529,90 @@ def add_tracks_to_album(album_id: int, track_ids: list[int]) -> int:
     return added
 
 
+def remove_track_from_album(album_id: int, track_id: int) -> None:
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id FROM album_tracks WHERE album_id = ? AND track_id = ? AND deleted_at IS NULL",
+        (album_id, track_id),
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute(
+        "UPDATE album_tracks SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        (row["id"],),
+    )
+    album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()
+    track_row = get_track(track_id)
+    if album_row is not None and track_row is not None:
+        _enqueue_sync_op(
+            conn, "album_items",
+            {"album_uuid": album_row["uuid"], "track_ref": _track_ref(track_row), "deleted": True},
+        )
+    conn.commit()
+
+
+def delete_album(album_id: int) -> None:
+    """Soft-delete: la fila se conserva con `deleted_at` para poder propagar el borrado a
+    otros dispositivos (mismo patrón que `delete_playlist`) — `list_albums()` ya filtra
+    `deleted_at IS NULL`."""
+    conn = get_connection()
+    album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()
+    if album_row is None:
+        return
+    conn.execute(
+        "UPDATE albums SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        (album_id,),
+    )
+    _enqueue_sync_op(conn, "albums", {"uuid": album_row["uuid"], "deleted": True})
+    conn.commit()
+
+
+def merge_duplicate_albums() -> int:
+    """Corrige en las bases ya existentes el efecto de un bug donde agregar canciones de una
+    compilación (soundtrack, tributo — un artista distinto por pista) a álbumes creaba un
+    álbum de una sola canción por cada artista, en vez de un único álbum (ver
+    `ui/window.py:_add_tracks_to_album_by_metadata`, que ya no agrupa por artista de pista).
+    Junta esos álbumes por nombre, movi��ndole las canciones al más antiguo del grupo y
+    borrando (soft-delete, sincronizado) los demás. Se llama en cada arranque — sin
+    duplicados que fusionar, es no-op. Devuelve cuántos álbumes se fusionaron/eliminaron."""
+    conn = get_connection()
+    albums = conn.execute(
+        "SELECT id, uuid, name, artist FROM albums WHERE deleted_at IS NULL ORDER BY id"
+    ).fetchall()
+
+    groups: dict[str, list[sqlite3.Row]] = {}
+    for album in albums:
+        groups.setdefault((album["name"] or "").strip().lower(), []).append(album)
+
+    merged = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        canonical, duplicates = group[0], group[1:]
+        for duplicate in duplicates:
+            tracks = list_album_tracks(duplicate["id"])
+            add_tracks_to_album(canonical["id"], [t["id"] for t in tracks])
+            for track in tracks:
+                remove_track_from_album(duplicate["id"], track["id"])
+            delete_album(duplicate["id"])
+            merged += 1
+
+        # El artista de la tarjeta fusionada: el de `canonical` si todo el grupo ya
+        # coincidía, o "Varios artistas" si el bug había separado una compilación real.
+        distinct_artists = {a["artist"] for a in group if a["artist"]}
+        if len(distinct_artists) > 1:
+            conn.execute(
+                "UPDATE albums SET artist = ?, updated_at = datetime('now') WHERE id = ?",
+                ("Varios artistas", canonical["id"]),
+            )
+            _enqueue_sync_op(
+                conn, "albums",
+                {"uuid": canonical["uuid"], "name": canonical["name"], "artist": "Varios artistas"},
+            )
+    conn.commit()
+    return merged
+
+
 def get_album(album_id: int) -> sqlite3.Row | None:
     return get_connection().execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
 
@@ -577,10 +661,16 @@ def list_albums() -> list[sqlite3.Row]:
 
 
 def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
+    # COALESCE(t.art_path, a.art_path) va primero en el SELECT: sqlite3.Row resuelve
+    # nombres de columna repetidos por orden de aparición, así que `row["art_path"]`
+    # devuelve este valor y no el de `t.*` que viene después. Así, una canción sin
+    # carátula propia (embebida/carpeta) muestra la del álbum armado a mano al sonar.
     return get_connection().execute(
         """
-        SELECT t.* FROM tracks t
+        SELECT COALESCE(t.art_path, a.art_path) AS art_path, t.*
+        FROM tracks t
         JOIN album_tracks atk ON atk.track_id = t.id AND atk.deleted_at IS NULL
+        JOIN albums a ON a.id = atk.album_id
         WHERE atk.album_id = ? AND t.cache_status != 'missing'
         ORDER BY t.disc_number, t.track_number, t.title
         """,

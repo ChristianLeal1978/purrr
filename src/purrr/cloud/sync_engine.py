@@ -218,6 +218,11 @@ _COVERS_BUCKET = "covers"
 
 
 def _push_album(client, payload: dict) -> None:
+    if payload.get("deleted"):
+        client.table("albums").update({"deleted_at": _now_iso()}).eq(
+            "uuid", payload["uuid"]
+        ).execute()
+        return
     row = {
         "uuid": payload["uuid"],
         "name": payload["name"],
@@ -246,6 +251,11 @@ def _upload_album_art(client, album_uuid: str, local_path: str) -> str:
 
 
 def _push_album_item(client, payload: dict) -> None:
+    if payload.get("deleted"):
+        client.table("album_items").update({"deleted_at": _now_iso()}).eq(
+            "album_uuid", payload["album_uuid"]
+        ).eq("track_ref", payload["track_ref"]).execute()
+        return
     client.table("album_items").upsert(
         {
             "album_uuid": payload["album_uuid"],
