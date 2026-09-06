@@ -174,6 +174,11 @@ class AlbumsView(Gtk.Box):
         )
         picture = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True)
         picture.set_size_request(_ART_SIZE, _ART_SIZE)
+        # halign/valign CENTER (en vez del FILL por defecto): sin esto, el Gtk.Box vertical
+        # de la tarjeta estira la Picture al ancho completo de la columna del GridView
+        # (que suele ser más ancha que _ART_SIZE), deformando la carátula a un rectángulo.
+        picture.set_halign(Gtk.Align.CENTER)
+        picture.set_valign(Gtk.Align.CENTER)
         picture.add_css_class("card")
         picture.set_overflow(Gtk.Overflow.HIDDEN)
 
@@ -189,15 +194,15 @@ class AlbumsView(Gtk.Box):
         # tarjetas al hacer scroll — list_item.get_item() da el álbum actual de la tarjeta.
         art_search_button.connect("clicked", lambda _b, li=list_item: self._on_art_search_clicked(li))
 
-        overlay = Gtk.Overlay()
+        overlay = Gtk.Overlay(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
         overlay.set_child(picture)
         overlay.add_overlay(art_search_button)
 
-        title = Gtk.Label(halign=Gtk.Align.START, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        title = Gtk.Label(halign=Gtk.Align.CENTER, xalign=0.5, justify=Gtk.Justification.CENTER, ellipsize=Pango.EllipsizeMode.END)
         title.add_css_class("heading")
-        artist = Gtk.Label(halign=Gtk.Align.START, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        artist = Gtk.Label(halign=Gtk.Align.CENTER, xalign=0.5, justify=Gtk.Justification.CENTER, ellipsize=Pango.EllipsizeMode.END)
         artist.add_css_class("dim-label")
-        meta = Gtk.Label(halign=Gtk.Align.START, xalign=0)
+        meta = Gtk.Label(halign=Gtk.Align.CENTER, xalign=0.5, justify=Gtk.Justification.CENTER)
         meta.add_css_class("caption")
         meta.add_css_class("dim-label")
 
