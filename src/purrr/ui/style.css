@@ -192,6 +192,19 @@ headerbar.flat {
     background-color: @purrr_accent;
 }
 
+.purrr-lyrics-view {
+    background: transparent;
+}
+
+.purrr-lyrics-line {
+    font-size: 1.05rem;
+}
+
+.purrr-lyrics-line-active {
+    color: @purrr_accent_hover;
+    font-weight: bold;
+}
+
 /* --- Tabla de biblioteca -------------------------------------------------- */
 
 columnview {

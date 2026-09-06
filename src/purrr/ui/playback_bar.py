@@ -21,6 +21,7 @@ from purrr.player.spotify_connect import SpotifyConnectController
 from purrr.player.station import Station
 from purrr.spotify.track import SpotifyTrack
 from purrr.sync.controller import SyncController
+from purrr.ui.lyrics_view import LyricsView
 from purrr.ui.textures import load_texture_at_size
 from purrr.ui.waveform_scrubber import WaveformScrubber
 
@@ -58,6 +59,7 @@ class PlaybackBar(Gtk.Box):
         self._play_recorded_track_id: int | None = None
         self._waveform_token: int | None = None
         self._art_token: int | None = None
+        self._lyrics_token: object | None = None
         self._playback_mode = "local"  # 'local' | 'station' | 'spotify'
         self._station_resolve_token: Station | None = None
         self._station_art_token: object | None = None
@@ -176,6 +178,10 @@ class PlaybackBar(Gtk.Box):
         volume_row.append(self._volume_scale)
         self.append(volume_row)
 
+        # --- Letra sincronizada, debajo de los controles ------------------------
+        self._lyrics_view = LyricsView()
+        self.append(self._lyrics_view)
+
         self._set_controls_sensitive(False)
 
     def play_queue_item(self, item: QueueItem) -> None:
@@ -223,6 +229,7 @@ class PlaybackBar(Gtk.Box):
                 on_complete=lambda path, track_id=item.track_id: self._on_folder_cover_ready(track_id, path),
             )
         self._load_waveform(item)
+        self._load_lyrics(item.drive_file_id, item.title, item.artist, item.album, item.duration_seconds)
         self.emit("now-playing-changed", item)
 
     def play_station(self, station: Station) -> None:
@@ -240,6 +247,11 @@ class PlaybackBar(Gtk.Box):
         self._title_label.set_text(station.display_name)
         self._station_art_token = None
         self._update_art(None)
+        # Una radio en vivo no tiene una duración/track fijo contra el cual sincronizar letra
+        # (y varias, como Rainwave, ni siquiera anuncian "Artista - Canción" de forma
+        # confiable) — el panel queda con el mensaje de "sin letra" hasta la próxima canción.
+        self._lyrics_token = None
+        self._lyrics_view.set_lyrics(None)
         self._station_resolve_token = station
         self._rainwave_last_title = None
         if station.provider == "rainwave":
@@ -298,6 +310,10 @@ class PlaybackBar(Gtk.Box):
         self._play_pause_button.set_icon_name("media-playback-pause-symbolic")
         self._set_controls_sensitive(True)
         self._update_art(art_path)
+        self._load_lyrics(
+            f"spotify-{track.id}", track.title, track.artist or "", track.album or "",
+            track.duration_seconds or 0,
+        )
         self._spotify_controller.play(track)
 
     def _play_spotify_queue_item(self, item: QueueItem) -> None:
@@ -357,6 +373,22 @@ class PlaybackBar(Gtk.Box):
             return  # el usuario ya cambió de canción mientras se calculaba esta
         self._waveform_scrubber.set_waveform(bars)
 
+    def _load_lyrics(self, cache_key: str, title: str, artist: str, album: str, duration_seconds: float) -> None:
+        # Token por objeto (no por id) para no acoplar esto al tipo de identificador de cada
+        # fuente (int para Drive, string para Spotify) — mismo patrón que `_station_art_token`.
+        token = object()
+        self._lyrics_token = token
+        self._lyrics_view.set_loading()
+        self._sync_controller.ensure_lyrics(
+            cache_key, title, artist, album, duration_seconds,
+            on_complete=lambda result, t=token: self._on_lyrics_ready(t, result),
+        )
+
+    def _on_lyrics_ready(self, token: object, result) -> None:
+        if token is not self._lyrics_token:
+            return  # el usuario ya cambió de canción mientras se buscaba esta letra
+        self._lyrics_view.set_lyrics(result)
+
     def _update_art(self, art_path: str | None) -> None:
         self._current_art_path = art_path
         if art_path and Path(art_path).exists():
@@ -390,6 +422,8 @@ class PlaybackBar(Gtk.Box):
         self._artist_label.set_text(item.artist or "")
         self._update_art(item.art_path)
         self._art_token = None
+        self._lyrics_token = None
+        self._lyrics_view.set_loading()
         self._waveform_token = None
         self._waveform_scrubber.set_waveform([])
         self._waveform_scrubber.set_progress(0.0)
@@ -519,6 +553,7 @@ class PlaybackBar(Gtk.Box):
         self._waveform_scrubber.set_progress(position / self._current_duration)
         self._position_label.set_text(_format_time(position))
         self._duration_label.set_text(_format_time(duration))
+        self._lyrics_view.set_position(position)
         self._maybe_record_play(position)
 
     def _maybe_record_play(self, position: float) -> None:
@@ -685,6 +720,8 @@ class PlaybackBar(Gtk.Box):
         self._station_art_token = None
         self._rainwave_poll_token = None
         self._update_art(None)
+        self._lyrics_token = None
+        self._lyrics_view.set_lyrics(None)
 
     # --- Spotify Connect (control remoto — ver player/spotify_connect.py) --------
 
@@ -697,6 +734,7 @@ class PlaybackBar(Gtk.Box):
         self._waveform_scrubber.set_progress(position / self._current_duration)
         self._position_label.set_text(_format_time(position))
         self._duration_label.set_text(_format_time(duration))
+        self._lyrics_view.set_position(position)
         self._play_pause_button.set_icon_name(
             "media-playback-pause-symbolic" if is_playing else "media-playback-start-symbolic"
         )

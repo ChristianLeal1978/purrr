@@ -20,6 +20,7 @@ from purrr.cache.manager import (
 from purrr.db import database
 from purrr.drive.client import get_service
 from purrr.drive.scanner import DriveCoverFile, looks_like_cover, scan_folder_tree
+from purrr.metadata import lyrics_search
 from purrr.metadata.extractor import extract_embedded_art, extract_metadata, extract_partial_metadata
 
 _PARTIAL_FETCH_SIZES = (262_144, 2_097_152, 8_388_608)  # 256 KB, 2 MB, 8 MB
@@ -252,6 +253,41 @@ class SyncController(GObject.Object):
         except Exception:  # noqa: BLE001 — si falla el análisis, mejor una barra plana que romper la UI
             bars = []
         GLib.idle_add(on_complete, bars)
+
+    def ensure_lyrics(
+        self,
+        cache_key: str,
+        title: str,
+        artist: str,
+        album: str,
+        duration_seconds: float,
+        on_complete: Callable[[lyrics_search.LyricsResult | None], None],
+    ) -> None:
+        """Entrega la letra de este track: al toque si ya está cacheada (incluso si la última
+        vez no se encontró nada — ver `lyrics_search._save_cache`), o buscándola en lrclib.net
+        en un hilo aparte. `cache_key` es del llamador (drive_file_id para tracks de Drive,
+        `spotify-<id>` para Spotify) para no acoplar este módulo a un tipo de id en particular."""
+        cached = lyrics_search.load_cached(cache_key)
+        if cached is not None:
+            on_complete(cached)
+            return
+        threading.Thread(
+            target=self._fetch_lyrics_thread,
+            args=(cache_key, title, artist, album, duration_seconds, on_complete),
+            daemon=True,
+        ).start()
+
+    def _fetch_lyrics_thread(
+        self,
+        cache_key: str,
+        title: str,
+        artist: str,
+        album: str,
+        duration_seconds: float,
+        on_complete: Callable[[lyrics_search.LyricsResult | None], None],
+    ) -> None:
+        result = lyrics_search.fetch_and_cache(cache_key, title, artist, album, duration_seconds)
+        GLib.idle_add(on_complete, result)
 
     def _resolve_embedded_art(self, track_row, local_audio_path: Path) -> str | None:
         """Solo arte embebido en el archivo de audio local — no requiere red."""

@@ -16,6 +16,7 @@ AUDIO_CACHE_DIR = CACHE_DIR / "audio"
 ART_CACHE_DIR = CACHE_DIR / "art"
 ALBUM_ART_CACHE_DIR = CACHE_DIR / "album_art"
 WAVEFORM_CACHE_DIR = CACHE_DIR / "waveform"
+LYRICS_CACHE_DIR = CACHE_DIR / "lyrics"
 MOOD_MODELS_DIR = CACHE_DIR / "models"
 DATA_DIR = Path(GLib.get_user_data_dir()) / "purrr"
 
@@ -66,7 +67,7 @@ RADIOTUNES_CONFIG_PATH = CONFIG_DIR / "radiotunes_key.json"
 def ensure_dirs() -> None:
     for path in (
         DATA_DIR, AUDIO_CACHE_DIR, ART_CACHE_DIR, ALBUM_ART_CACHE_DIR, WAVEFORM_CACHE_DIR,
-        MOOD_MODELS_DIR,
+        LYRICS_CACHE_DIR, MOOD_MODELS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
