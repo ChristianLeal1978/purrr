@@ -61,11 +61,10 @@ class CloudSyncEngine(context: Context) {
     private val _syncErrors = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val syncErrors: SharedFlow<String> = _syncErrors
 
-    /** Idempotente — no hace nada si Supabase todavía no está configurado o no hay
-     * sesión iniciada, así se puede llamar siempre al arrancar la app. */
+    /** Idempotente — se puede llamar siempre al arrancar la app. */
     fun start() {
         if (job?.isActive == true) return
-        val client = SupabaseClientProvider.get(appContext) ?: return
+        val client = SupabaseClientProvider.get()
         job = scope.launch {
             launch { flushLoop(client) }
             launch { realtimeLoop(client) }

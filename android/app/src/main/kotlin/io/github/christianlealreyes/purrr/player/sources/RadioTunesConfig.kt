@@ -4,8 +4,8 @@ import android.content.Context
 
 /** Listen Key de RadioTunes (cuenta Premium AudioAddict) — se copia a mano desde
  * la cuenta del usuario (Player Settings → Hardware Player), mismo patrón que
- * `GoogleAuthConfig`/`SupabaseConfig`: sin OAuth, Purrr nunca maneja la
- * contraseña real de la cuenta. */
+ * `GoogleAuthConfig`: sin OAuth, Purrr nunca maneja la contraseña real de la
+ * cuenta. */
 class RadioTunesConfig(context: Context) {
     private val prefs = context.getSharedPreferences("radiotunes_config", Context.MODE_PRIVATE)
 
