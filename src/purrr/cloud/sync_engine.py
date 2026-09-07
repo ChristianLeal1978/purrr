@@ -116,9 +116,16 @@ class CloudSyncEngine(GObject.Object):
         client = cloud_client.get_client()
         for op in ops:
             payload = json.loads(op["payload_json"])
-            _PUSH_HANDLERS[op["table_name"]](client, payload)
-            # Si el push de arriba lanza, esta fila (y las siguientes del batch) se
-            # quedan en la cola para el próximo ciclo — no se llega a este delete.
+            try:
+                _PUSH_HANDLERS[op["table_name"]](client, payload)
+            except Exception as exc:
+                # Esta fila puede depender de otra que todavía no se aplicó remoto (p. ej.
+                # un `album_items` cuyo álbum recién se está creando en este mismo ciclo,
+                # con un id más alto en la cola) — no bloquea el resto del lote, sigue con
+                # la próxima y reintenta esta en el próximo ciclo. Antes, un solo error acá
+                # frenaba TODO lo que viniera después para siempre.
+                GLib.idle_add(self.emit, "sync-error", f"push {op['table_name']}: {exc}")
+                continue
             database.delete_pending_sync_op(op["id"])
 
     # --- pull: suscripción realtime -----------------------------------------

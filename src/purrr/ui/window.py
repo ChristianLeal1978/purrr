@@ -69,6 +69,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._queue = PlayQueue()
         self._sync_controller = SyncController()
         self._cloud_sync_engine = CloudSyncEngine()
+        self._cloud_had_sync_error = False
         self._mood_controller = MoodAnalysisController()
         self._current_playlist_id: int | None = None
         self._current_search_text: str | None = None
@@ -100,6 +101,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._restore_last_view()
         self._refresh_cloud_settings_view()
         self._cloud_sync_engine.start()
+        GLib.timeout_add(1000, self._poll_sync_status)
 
     # --- Construcción de la UI --------------------------------------------
 
@@ -918,7 +920,19 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.refresh(database.list_albums())
 
     def _on_cloud_sync_error(self, _engine, message: str) -> None:
+        self._cloud_had_sync_error = True
         self._cloud_settings_view.log_event(message)
+
+    def _poll_sync_status(self) -> bool:
+        """Reemplaza el volcado de errores crudos por un spinner: mientras queden
+        operaciones en `pending_sync_ops` hay sync en curso (el flusher corre cada
+        `_FLUSH_INTERVAL_SECONDS`, ver cloud/sync_engine.py); una vez vacía la cola,
+        el último error (si lo hubo) se descarta — ya no aplica."""
+        pending = bool(database.list_pending_sync_ops(limit=1))
+        if not pending:
+            self._cloud_had_sync_error = False
+        self._cloud_settings_view.set_syncing(pending, has_errors=self._cloud_had_sync_error)
+        return GLib.SOURCE_CONTINUE
 
     # --- Spotify (Fase 4) --------------------------------------------------
 

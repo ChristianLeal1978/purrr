@@ -300,17 +300,45 @@ class CloudSettingsView(Gtk.Box):
         self._connected_box.append(self._connected_row)
         self._content.append(self._connected_box)
 
-    # --- Log de sync (debug) --------------------------------------------------
+    # --- Estado de sync + log de debug -----------------------------------------
 
     def _build_log(self) -> None:
-        header = Gtk.Label(label="Actividad reciente", halign=Gtk.Align.START, css_classes=["title-4"])
+        # Estado visible por defecto: un spinner + una frase, nada de texto técnico
+        # crudo — los mensajes de `log_event` (incluidos los errores de reintento del
+        # flusher) quedan adentro del Expander colapsado, para quien los necesite
+        # depurar sin ensuciar la pantalla en el uso normal.
+        self._sync_spinner = Gtk.Spinner()
+        self._sync_status_label = Gtk.Label(label="Todo sincronizado", css_classes=["dim-label"])
+        self._sync_status_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.START
+        )
+        self._sync_status_box.append(self._sync_spinner)
+        self._sync_status_box.append(self._sync_status_label)
+
         self._log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=120)
         scrolled.set_child(self._log_box)
-        self._log_header = header
-        self._log_scrolled = scrolled
-        self._content.append(header)
-        self._content.append(scrolled)
+        self._log_expander = Gtk.Expander(label="Detalles técnicos")
+        self._log_expander.set_child(scrolled)
+        self._content.append(self._sync_status_box)
+        self._content.append(self._log_expander)
+
+    def set_syncing(self, active: bool, has_errors: bool = False) -> None:
+        """`active`: hay operaciones de sync pendientes de empujar a Supabase ahora
+        mismo. `has_errors`: el último intento falló (se sigue reintentando solo) —
+        se muestra sin el texto técnico crudo, que queda en "Detalles técnicos"."""
+        self._sync_spinner.set_visible(active)
+        if active:
+            self._sync_spinner.start()
+        else:
+            self._sync_spinner.stop()
+        if active:
+            label = "Sincronizando datos…"
+        elif has_errors:
+            label = "No se pudo sincronizar todo — reintentando…"
+        else:
+            label = "Todo sincronizado"
+        self._sync_status_label.set_label(label)
 
     def log_event(self, message: str) -> None:
         label = Gtk.Label(label=message, halign=Gtk.Align.START, css_classes=["caption"], wrap=True)
@@ -338,8 +366,8 @@ class CloudSettingsView(Gtk.Box):
     ) -> None:
         self._login_page.set_visible(not logged_in)
         self._connected_box.set_visible(logged_in)
-        self._log_header.set_visible(logged_in)
-        self._log_scrolled.set_visible(logged_in)
+        self._sync_status_box.set_visible(logged_in)
+        self._log_expander.set_visible(logged_in)
         if logged_in:
             self._connected_row.set_title(escape(email) if email else "Conectado")
             self._connected_avatar.set_text(name or email or "")

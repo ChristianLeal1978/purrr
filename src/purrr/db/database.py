@@ -62,6 +62,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _backfill_uuids(conn)
     _backfill_album_tracks_updated_at(conn)
     _migrate_playlist_tracks_to_items(conn)
+    _repair_orphaned_cloud_pushes(conn)
 
 
 def _backfill_album_tracks_updated_at(conn: sqlite3.Connection) -> None:
@@ -106,17 +107,49 @@ def _migrate_playlist_tracks_to_items(conn: sqlite3.Connection) -> None:
 
 def _backfill_uuids(conn: sqlite3.Connection) -> None:
     """Las filas de playlists/albums creadas antes de que existiera la columna
-    `uuid` (Fase 0, sync entre dispositivos) necesitan una identidad estable."""
+    `uuid` (Fase 0, sync entre dispositivos) necesitan una identidad estable — y como
+    Supabase nunca las vio, hay que encolar su push también (antes no se hacía: un
+    `album_items`/`playlist_items` posterior que referenciara una de estas filas
+    fallaba por FK para siempre, porque el padre nunca llegaba a existir remoto)."""
     for table in ("playlists", "albums"):
-        rows = conn.execute(f"SELECT id FROM {table} WHERE uuid IS NULL").fetchall()
+        columns = "id, name" + (", artist" if table == "albums" else "")
+        rows = conn.execute(f"SELECT {columns} FROM {table} WHERE uuid IS NULL").fetchall()
         for row in rows:
-            conn.execute(
-                f"UPDATE {table} SET uuid = ? WHERE id = ?", (str(uuid_lib.uuid4()), row["id"])
-            )
+            new_uuid = str(uuid_lib.uuid4())
+            conn.execute(f"UPDATE {table} SET uuid = ? WHERE id = ?", (new_uuid, row["id"]))
+            payload = {"uuid": new_uuid, "name": row["name"]}
+            if table == "albums":
+                payload["artist"] = row["artist"]
+            _enqueue_sync_op(conn, table, payload)
         conn.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"
         )
     conn.commit()
+
+
+def _repair_orphaned_cloud_pushes(conn: sqlite3.Connection) -> None:
+    """Reparación de una sola vez (2026-09): antes de este fix, `_backfill_uuids`
+    nunca encolaba el push del álbum/playlist en sí, así que cualquier fila creada
+    antes de que existiera el sync entre dispositivos quedó "fantasma" para
+    Supabase — sus `album_items`/`playlist_items` fallan por FK en cada ciclo del
+    flusher, para siempre. Reencola el push de cada álbum/playlist local no
+    borrado; `_push_album`/`_push_playlist` son upsert por uuid, así que reencolar
+    uno que ya existía remoto no hace daño, solo un update de más."""
+    flag = "repair_orphaned_cloud_pushes_v1"
+    if get_state(flag):
+        return
+    for row in conn.execute(
+        "SELECT uuid, name, artist FROM albums WHERE deleted_at IS NULL AND uuid IS NOT NULL"
+    ).fetchall():
+        _enqueue_sync_op(
+            conn, "albums", {"uuid": row["uuid"], "name": row["name"], "artist": row["artist"]}
+        )
+    for row in conn.execute(
+        "SELECT uuid, name FROM playlists WHERE deleted_at IS NULL AND uuid IS NOT NULL"
+    ).fetchall():
+        _enqueue_sync_op(conn, "playlists", {"uuid": row["uuid"], "name": row["name"]})
+    conn.commit()
+    set_state(flag, "1")
 
 
 def init_db() -> None:
