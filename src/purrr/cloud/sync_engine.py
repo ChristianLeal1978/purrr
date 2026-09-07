@@ -440,13 +440,14 @@ def _apply_album(conn, record: dict, engine) -> str | None:
         )
     conn.commit()
 
-    # Fase 2: si el álbum ya tiene una carátula local (de cualquier origen) no se
-    # vuelve a bajar aunque la remota haya cambiado — simplificación aceptada, ver
-    # el plan. Cubre el caso principal (este dispositivo todavía no tiene ninguna)
-    # sin la complejidad de detectar una carátula distinta más adelante.
+    # La carátula remota siempre gana si el registro llegó hasta acá: el chequeo de
+    # más arriba (`_is_newer_or_equal`) ya filtró que sea más nueva o igual que la
+    # local por `updated_at`. Así, reemplazar una carátula por una versión en mejor
+    # calidad desde cualquier dispositivo se propaga al resto — antes, el primer
+    # dispositivo que tuviera alguna carátula (de cualquier origen) bloqueaba
+    # cualquier reemplazo posterior.
     storage_path = record.get("art_storage_path")
-    already_has_art = local is not None and local["art_path"]
-    if storage_path and not already_has_art:
+    if storage_path:
         album_row = conn.execute("SELECT id FROM albums WHERE uuid = ?", (album_uuid,)).fetchone()
         if album_row is not None:
             threading.Thread(
