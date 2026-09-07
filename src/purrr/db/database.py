@@ -45,10 +45,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "deleted_at": "ALTER TABLE albums ADD COLUMN deleted_at TEXT",
     },
     "album_tracks": {
-        "updated_at": (
-            "ALTER TABLE album_tracks ADD COLUMN updated_at TEXT NOT NULL "
-            "DEFAULT (datetime('now'))"
-        ),
+        "updated_at": "ALTER TABLE album_tracks ADD COLUMN updated_at TEXT",
         "deleted_at": "ALTER TABLE album_tracks ADD COLUMN deleted_at TEXT",
     },
 }
@@ -63,7 +60,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 conn.execute(statement)
     conn.commit()
     _backfill_uuids(conn)
+    _backfill_album_tracks_updated_at(conn)
     _migrate_playlist_tracks_to_items(conn)
+
+
+def _backfill_album_tracks_updated_at(conn: sqlite3.Connection) -> None:
+    """La columna `updated_at` de `album_tracks` no puede llevar un default no
+    constante en el ALTER TABLE (SQLite lo rechaza), así que las filas viejas
+    quedan en NULL tras la migración y se rellenan acá con `added_at`."""
+    conn.execute(
+        "UPDATE album_tracks SET updated_at = added_at WHERE updated_at IS NULL"
+    )
+    conn.commit()
 
 
 def _migrate_playlist_tracks_to_items(conn: sqlite3.Connection) -> None:
