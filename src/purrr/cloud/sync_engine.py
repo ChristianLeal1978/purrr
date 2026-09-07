@@ -95,6 +95,7 @@ class CloudSyncEngine(GObject.Object):
         if self._realtime_thread is None or not self._realtime_thread.is_alive():
             self._realtime_thread = threading.Thread(target=self._realtime_loop, daemon=True)
             self._realtime_thread.start()
+            threading.Thread(target=self._initial_pull, daemon=True).start()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -128,7 +129,27 @@ class CloudSyncEngine(GObject.Object):
                 continue
             database.delete_pending_sync_op(op["id"])
 
-    # --- pull: suscripción realtime -----------------------------------------
+    # --- pull: reconciliación inicial + suscripción realtime -----------------
+
+    def _initial_pull(self) -> None:
+        """La suscripción realtime (`_realtime_session`) solo entrega eventos que
+        ocurren MIENTRAS está conectada — un cambio hecho en otro dispositivo
+        mientras este no corría (el caso típico "cambié algo en casa, no llegó a la
+        oficina") nunca se aplicaba, sin importar cuántas veces se reiniciara acá.
+        Se llama una vez por cada `start()` real (no en los no-op de llamadas
+        repetidas) y trae todo lo que haya en Supabase ahora mismo, fila por fila,
+        por los mismos `_apply_*` que usa el realtime — mismo last-write-wins por
+        `updated_at`. El orden de `_SYNCED_TABLES` ya deja "albums"/"playlists"
+        antes que "album_items"/"playlist_items", que dependen de que el padre ya
+        exista localmente."""
+        try:
+            client = cloud_client.get_client()
+            for table in _SYNCED_TABLES:
+                rows = client.table(table).select("*").execute().data
+                for record in rows:
+                    GLib.idle_add(self._apply_remote_event, table, record)
+        except Exception as exc:
+            GLib.idle_add(self.emit, "sync-error", f"pull inicial: {exc}")
 
     def _realtime_loop(self) -> None:
         while not self._stop_event.is_set():
