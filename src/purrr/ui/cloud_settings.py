@@ -92,9 +92,10 @@ class CloudSettingsView(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, halign=Gtk.Align.CENTER)
         box.set_size_request(320, -1)
 
-        # Foto opcional (solo para "Crear cuenta"): sin ella, Adw.Avatar cae solo a
-        # las iniciales del texto que le demos (ver _on_name_changed), no hace falta
-        # calcularlas a mano.
+        # Por defecto la pantalla solo pide email + contraseña ("Iniciar sesión"); los
+        # campos de esta sección (foto, nombre, repetir contraseña) solo aplican a
+        # "Crear cuenta" y quedan ocultos hasta que _enter_signup_mode los revela.
+        self._signup_mode = False
         self._avatar_path: str | None = None
         self._avatar_widget = Adw.Avatar(size=64, show_initials=True, halign=Gtk.Align.CENTER)
         avatar_button = Gtk.Button(
@@ -105,20 +106,20 @@ class CloudSettingsView(Gtk.Box):
             label="Quitar foto", halign=Gtk.Align.CENTER, css_classes=["flat"], visible=False
         )
         self._avatar_remove_button.connect("clicked", lambda _b: self.set_avatar_photo(None))
-        avatar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, halign=Gtk.Align.CENTER)
-        avatar_box.append(self._avatar_widget)
-        avatar_box.append(avatar_button)
-        avatar_box.append(self._avatar_remove_button)
+        self._avatar_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=4, halign=Gtk.Align.CENTER, visible=False
+        )
+        self._avatar_box.append(self._avatar_widget)
+        self._avatar_box.append(avatar_button)
+        self._avatar_box.append(self._avatar_remove_button)
 
-        # El nombre, la repetición de contraseña y el medidor de fortaleza solo los
-        # pide "Crear cuenta"; "Iniciar sesión" los ignora.
-        self._name_entry = Gtk.Entry(placeholder_text="Nombre (solo para crear cuenta)")
+        self._name_entry = Gtk.Entry(placeholder_text="Nombre", visible=False)
         self._name_entry.connect("changed", self._on_name_changed)
         self._email_entry = Gtk.Entry(placeholder_text="email@ejemplo.com")
         self._password_entry = Gtk.Entry(placeholder_text="Contraseña", visibility=False)
         self._password_entry.connect("changed", self._on_password_changed)
         self._password_confirm_entry = Gtk.Entry(
-            placeholder_text="Repetir contraseña (solo para crear cuenta)", visibility=False
+            placeholder_text="Repetir contraseña", visibility=False, visible=False
         )
 
         self._strength_bar = Gtk.LevelBar(min_value=0, max_value=5, visible=False)
@@ -133,13 +134,17 @@ class CloudSettingsView(Gtk.Box):
             label="", halign=Gtk.Align.START, css_classes=["error"], wrap=True, visible=False
         )
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.CENTER)
-        sign_in_button = Gtk.Button(label="Iniciar sesión", css_classes=["suggested-action", "pill"])
-        sign_in_button.connect("clicked", self._on_sign_in_clicked)
-        sign_up_button = Gtk.Button(label="Crear cuenta", css_classes=["pill"])
-        sign_up_button.connect("clicked", self._on_sign_up_clicked)
-        button_box.append(sign_in_button)
-        button_box.append(sign_up_button)
-        box.append(avatar_box)
+        self._sign_in_button = Gtk.Button(label="Iniciar sesión", css_classes=["suggested-action", "pill"])
+        self._sign_in_button.connect("clicked", self._on_sign_in_clicked)
+        self._sign_up_button = Gtk.Button(label="Crear cuenta", css_classes=["pill"])
+        self._sign_up_button.connect("clicked", self._on_sign_up_clicked)
+        button_box.append(self._sign_in_button)
+        button_box.append(self._sign_up_button)
+        self._back_to_login_button = Gtk.Button(
+            label="Volver a iniciar sesión", halign=Gtk.Align.CENTER, css_classes=["flat"], visible=False
+        )
+        self._back_to_login_button.connect("clicked", self._on_back_to_login_clicked)
+        box.append(self._avatar_box)
         box.append(self._name_entry)
         box.append(self._email_entry)
         box.append(self._password_entry)
@@ -148,6 +153,7 @@ class CloudSettingsView(Gtk.Box):
         box.append(self._password_confirm_entry)
         box.append(self._error_label)
         box.append(button_box)
+        box.append(self._back_to_login_button)
         return box
 
     def _build_pending_confirmation(self) -> Gtk.Widget:
@@ -194,7 +200,7 @@ class CloudSettingsView(Gtk.Box):
 
     def _on_password_changed(self, _entry) -> None:
         password = self._password_entry.get_text()
-        if not password:
+        if not self._signup_mode or not password:
             self._strength_bar.set_visible(False)
             self._strength_label.set_visible(False)
             return
@@ -231,6 +237,12 @@ class CloudSettingsView(Gtk.Box):
         self.emit("sign-in-requested", email, password)
 
     def _on_sign_up_clicked(self, _button) -> None:
+        # Primer click: solo revela los campos de "Crear cuenta" (nombre, foto,
+        # repetir contraseña) — recién el segundo click, ya en modo registro, valida
+        # y emite la señal. Así el formulario por defecto pide solo email/contraseña.
+        if not self._signup_mode:
+            self._enter_signup_mode()
+            return
         name = self._name_entry.get_text().strip()
         email, password = self._credentials()
         password_confirm = self._password_confirm_entry.get_text()
@@ -245,6 +257,33 @@ class CloudSettingsView(Gtk.Box):
             return
         self._error_label.set_visible(False)
         self.emit("sign-up-requested", name, email, password, self._avatar_path or "")
+
+    def _enter_signup_mode(self) -> None:
+        self._signup_mode = True
+        self._avatar_box.set_visible(True)
+        self._name_entry.set_visible(True)
+        self._password_confirm_entry.set_visible(True)
+        self._sign_in_button.set_visible(False)
+        self._back_to_login_button.set_visible(True)
+        self._error_label.set_visible(False)
+        self._on_password_changed(self._password_entry)
+        self._name_entry.grab_focus()
+
+    def _on_back_to_login_clicked(self, _button) -> None:
+        self._exit_signup_mode()
+
+    def _exit_signup_mode(self) -> None:
+        self._signup_mode = False
+        self._avatar_box.set_visible(False)
+        self._name_entry.set_visible(False)
+        self._password_confirm_entry.set_visible(False)
+        self._sign_in_button.set_visible(True)
+        self._back_to_login_button.set_visible(False)
+        self._error_label.set_visible(False)
+        self._name_entry.set_text("")
+        self._password_confirm_entry.set_text("")
+        self.set_avatar_photo(None)
+        self._on_password_changed(self._password_entry)
 
     # --- Estado conectado ----------------------------------------------------
 
@@ -321,14 +360,12 @@ class CloudSettingsView(Gtk.Box):
 
     def reset_login_form(self) -> None:
         """Limpia el formulario de login/registro — se llama tras autenticar y al
-        cerrar sesión, para que la próxima vez no arrastre datos de la cuenta anterior."""
-        self._name_entry.set_text("")
+        cerrar sesión, para que la próxima vez no arrastre datos de la cuenta anterior
+        ni quede en modo "Crear cuenta"."""
+        self._exit_signup_mode()
         self._email_entry.set_text("")
         self._password_entry.set_text("")
-        self._password_confirm_entry.set_text("")
-        self._error_label.set_visible(False)
         self._login_stack.set_visible_child_name("form")
-        self.set_avatar_photo(None)
 
     def set_status(self, text: str) -> None:
         self._status_label.set_label(text)
