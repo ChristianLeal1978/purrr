@@ -68,6 +68,11 @@ class PlaybackBar(Gtk.Box):
         # que pedirle la canción actual a su API pública en un hilo — ver play_station.
         self._rainwave_poll_token: Station | None = None
         self._rainwave_last_title: str | None = None
+        # Título/artista/álbum de la "canción" actual de radio (o None fuera de modo
+        # station) — separado de las labels de la UI porque _apply_station_art necesita
+        # volver a publicar el mismo now-playing-changed una vez que la carátula
+        # termina de bajar, y para eso hay que recordar qué se publicó la primera vez.
+        self._station_song_meta: dict | None = None
 
         self.engine.connect("position-updated", self._on_position_updated)
         self.engine.connect("eos", self._on_eos)
@@ -232,6 +237,21 @@ class PlaybackBar(Gtk.Box):
         self._load_lyrics(item.drive_file_id, item.title, item.artist, item.album, item.duration_seconds)
         self.emit("now-playing-changed", item)
 
+    def _publish_now_playing(
+        self, *, track_id, title: str, artist: str = "", album: str = "",
+        duration_seconds: float = 0.0, art_path: str | None = None,
+    ) -> None:
+        """Empuja el estado actual (radio o Spotify Connect) como si fuera un
+        QueueItem — mpris/service.py escucha esto para que Powerzoid Music (o
+        cualquier otro cliente MPRIS) muestre artista/título/carátula correctos
+        sin importar la fuente. Antes solo `_start_playback` emitía esta señal,
+        así que MPRIS se quedaba pegado en el último track de Drive mientras
+        sonaba una radio o Spotify Connect."""
+        self.emit("now-playing-changed", QueueItem(
+            track_id=track_id, drive_file_id="", title=title, artist=artist, album=album,
+            local_path=None, duration_seconds=duration_seconds, art_path=art_path,
+        ))
+
     def play_station(self, station: Station) -> None:
         """Sintoniza una radio en vivo (Rainwave, Bío-Bío, SmoothJazz, RadioTunes)
         — a diferencia de `play_queue_item`, va directo al stream por URI: no hay
@@ -254,6 +274,16 @@ class PlaybackBar(Gtk.Box):
         self._lyrics_view.set_lyrics(None)
         self._station_resolve_token = station
         self._rainwave_last_title = None
+        self._station_song_meta = None
+        # Placeholder para MPRIS mientras se conecta y llega la primera canción real
+        # (tags ICY o polling de Rainwave, según la fuente) — así un cliente MPRIS
+        # como Powerzoid Music ya muestra el nombre de la estación de inmediato, en
+        # vez de quedarse con los datos del track de Drive que sonaba antes.
+        self._publish_now_playing(
+            track_id=f"station:{station.provider}:{station.slug}",
+            title=station.display_name,
+            artist=station.subtitle or "En vivo",
+        )
         if station.provider == "rainwave":
             self._rainwave_poll_token = station
             self._start_rainwave_polling(station)
@@ -315,6 +345,10 @@ class PlaybackBar(Gtk.Box):
             track.duration_seconds or 0,
         )
         self._spotify_controller.play(track)
+        self._publish_now_playing(
+            track_id=f"spotify:{track.id}", title=track.title, artist=track.artist or "",
+            album=track.album or "", duration_seconds=track.duration_seconds or 0, art_path=art_path,
+        )
 
     def _play_spotify_queue_item(self, item: QueueItem) -> None:
         spotify_id = item.track_id.rsplit(":", 1)[-1] if isinstance(item.track_id, str) else str(item.track_id)
@@ -598,12 +632,18 @@ class PlaybackBar(Gtk.Box):
         title = title.strip()
         if not title:
             return
-        station_name = self._current_station.display_name
+        station = self._current_station
+        station_name = station.display_name
         if " - " in title:
             artist, _, song = title.partition(" - ")
             artist, song = artist.strip(), song.strip()
             self._title_label.set_text(song or title)
             self._artist_label.set_text(f"{artist} · {station_name}" if artist else station_name)
+            self._station_song_meta = {
+                "track_id": f"station:{station.provider}:{station.slug}:{song or title}",
+                "title": song or title, "artist": artist, "album": station_name,
+            }
+            self._publish_now_playing(**self._station_song_meta)
             self._fetch_station_track_art(artist, song)
         else:
             # No todos los streams mandan "Artista - Canción" (Rainwave, por ejemplo, no
@@ -613,6 +653,11 @@ class PlaybackBar(Gtk.Box):
             self._artist_label.set_text(station_name)
             self._station_art_token = None
             self._update_art(None)
+            self._station_song_meta = {
+                "track_id": f"station:{station.provider}:{station.slug}:{title}",
+                "title": title, "artist": "", "album": station_name,
+            }
+            self._publish_now_playing(**self._station_song_meta)
 
     def _fetch_station_track_art(self, artist: str, song: str) -> None:
         """Busca en la API pública de iTunes la carátula de la canción que el stream
@@ -654,6 +699,8 @@ class PlaybackBar(Gtk.Box):
         if self._station_art_token != token:
             return GLib.SOURCE_REMOVE  # la canción ya cambió mientras se buscaba/bajaba
         self._update_art(path)
+        if self._station_song_meta is not None:
+            self._publish_now_playing(**self._station_song_meta, art_path=path)
         return GLib.SOURCE_REMOVE
 
     # --- Rainwave: sin metadata ICY, así que se pide por su API pública ------
@@ -687,6 +734,11 @@ class PlaybackBar(Gtk.Box):
         self._artist_label.set_text(f"{info.artist} · {station_name}" if info.artist else station_name)
         if info.title and info.title != self._rainwave_last_title:
             self._rainwave_last_title = info.title
+            self._station_song_meta = {
+                "track_id": f"station:{station.provider}:{station.slug}:{info.title}",
+                "title": info.title, "artist": info.artist or "", "album": info.album or station_name,
+            }
+            self._publish_now_playing(**self._station_song_meta)
             token = (station.slug, info.title)
             self._station_art_token = token
             self._fetch_url_art(info.art_url, token)
