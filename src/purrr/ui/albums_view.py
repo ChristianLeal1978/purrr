@@ -52,6 +52,7 @@ class AlbumsView(Gtk.Box):
         # album_id, album name, display_artist
         "album-rescan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
         "album-art-upload-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
+        "album-delete-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str)),  # album_id, album name
         "album-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # track_id
     }
@@ -254,6 +255,10 @@ class AlbumsView(Gtk.Box):
                 (
                     "Cargar imagen como carátula",
                     lambda: self.emit("album-art-upload-requested", album.album_id),
+                ),
+                (
+                    "Eliminar de la biblioteca",
+                    lambda: self.emit("album-delete-requested", album.album_id, album.album),
                 ),
             ],
         )

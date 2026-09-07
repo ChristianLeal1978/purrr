@@ -35,7 +35,7 @@ from purrr.sync.controller import SyncController
 from purrr.ui.album_dialogs import open_cover_approval_dialog
 from purrr.ui.albums_view import AlbumsView
 from purrr.ui.cloud_settings import CloudSettingsView
-from purrr.ui.dialogs import prompt_text
+from purrr.ui.dialogs import confirm_action, prompt_text
 from purrr.ui.drive_folder_picker import DriveFolderPickerDialog
 from purrr.ui.first_run import SourcesView
 from purrr.ui.folder_view import FolderBrowserView
@@ -194,6 +194,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.connect("album-art-search-requested", self._on_album_art_search_requested)
         self._albums_view.connect("album-rescan-requested", self._on_album_rescan_requested)
         self._albums_view.connect("album-art-upload-requested", self._on_album_art_upload_requested)
+        self._albums_view.connect("album-delete-requested", self._on_album_delete_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -608,6 +609,20 @@ class PurrrWindow(Adw.ApplicationWindow):
             self._toast("Carátula guardada.")
 
         dialog.open(self, None, on_open_finished)
+
+    def _on_album_delete_requested(self, _view, album_id: int, album_name: str) -> None:
+        def on_confirm() -> None:
+            database.delete_album(album_id)
+            self._albums_view.refresh(database.list_albums())
+            self._toast(f'"{album_name}" se eliminó de la biblioteca.')
+
+        confirm_action(
+            self,
+            heading="¿Eliminar álbum de la biblioteca?",
+            body=f'"{album_name}" se quitará de tus álbumes. Los archivos de las canciones no se eliminan.',
+            confirm_label="Eliminar",
+            on_confirm=on_confirm,
+        )
 
     def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
         term = f"{artist} {name}" if artist else name

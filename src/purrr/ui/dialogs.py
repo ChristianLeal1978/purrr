@@ -1,7 +1,8 @@
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk
 
 
 def prompt_text(parent: Gtk.Window, title: str, on_confirm, initial_text: str = "") -> None:
@@ -30,3 +31,25 @@ def prompt_text(parent: Gtk.Window, title: str, on_confirm, initial_text: str = 
 
     dialog.connect("response", on_response)
     dialog.present()
+
+
+def confirm_action(
+    parent: Gtk.Window, heading: str, body: str, confirm_label: str, on_confirm, destructive: bool = True
+) -> None:
+    """Diálogo chico de "¿confirmás?" (borrar álbum, etc.) — a diferencia de `prompt_text`,
+    no hay entrada de texto, solo Cancelar/confirmar."""
+    dialog = Adw.AlertDialog(heading=heading, body=body)
+    dialog.add_response("cancel", "Cancelar")
+    dialog.add_response("confirm", confirm_label)
+    dialog.set_response_appearance(
+        "confirm", Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.SUGGESTED
+    )
+    dialog.set_default_response("cancel")
+    dialog.set_close_response("cancel")
+
+    def on_response(_dlg, response):
+        if response == "confirm":
+            on_confirm()
+
+    dialog.connect("response", on_response)
+    dialog.present(parent)
