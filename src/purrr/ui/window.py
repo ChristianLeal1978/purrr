@@ -70,6 +70,16 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sync_controller = SyncController()
         self._cloud_sync_engine = CloudSyncEngine()
         self._cloud_had_sync_error = False
+        # Una sincronización inicial en un equipo nuevo puede traer cientos de filas
+        # (álbumes, ítems, reproducciones) de una sola vez — cada una llega como un
+        # `GLib.idle_add` separado (ver cloud/sync_engine.py) y sin este debounce cada
+        # una disparaba su propio refresco completo de la UI en el hilo principal,
+        # congelando la ventana el tiempo suficiente para que el sistema operativo la
+        # marcara como "no responde". Con esto, toda la ráfaga colapsa en un solo
+        # refresco (con prioridad baja, para que corra después de vaciarse la cola).
+        self._albums_refresh_pending = False
+        self._playlists_refresh_pending = False
+        self._stats_refresh_pending = False
         self._mood_controller = MoodAnalysisController()
         self._current_playlist_id: int | None = None
         self._current_search_text: str | None = None
@@ -397,8 +407,18 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_cloud_stats_changed(self, _engine) -> None:
         # Llegó una reproducción de otro dispositivo por sync en tiempo real — solo
         # vale la pena refrescar si el usuario está mirando la pantalla ahora mismo.
+        if self._content_stack.get_visible_child_name() != "stats":
+            return
+        if self._stats_refresh_pending:
+            return
+        self._stats_refresh_pending = True
+        GLib.idle_add(self._flush_stats_refresh, priority=GLib.PRIORITY_LOW)
+
+    def _flush_stats_refresh(self) -> bool:
+        self._stats_refresh_pending = False
         if self._content_stack.get_visible_child_name() == "stats":
             self._refresh_stats_view()
+        return GLib.SOURCE_REMOVE
 
     def _on_cloud_selected(self, _sidebar) -> None:
         self._content_page.set_title("Cuenta / Sync")
@@ -930,13 +950,29 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._refresh_cloud_settings_view()
 
     def _on_cloud_playlists_changed(self, _engine) -> None:
+        if self._playlists_refresh_pending:
+            return
+        self._playlists_refresh_pending = True
+        GLib.idle_add(self._flush_playlists_refresh, priority=GLib.PRIORITY_LOW)
+
+    def _flush_playlists_refresh(self) -> bool:
+        self._playlists_refresh_pending = False
         self._sidebar.refresh_playlists(database.list_playlists())
         if self._current_playlist_id is not None:
             self._on_playlist_selected(self._sidebar, self._current_playlist_id)
+        return GLib.SOURCE_REMOVE
 
     def _on_cloud_albums_changed(self, _engine) -> None:
+        if self._albums_refresh_pending:
+            return
+        self._albums_refresh_pending = True
+        GLib.idle_add(self._flush_albums_refresh, priority=GLib.PRIORITY_LOW)
+
+    def _flush_albums_refresh(self) -> bool:
+        self._albums_refresh_pending = False
         database.merge_duplicate_albums()
         self._albums_view.refresh(database.list_albums())
+        return GLib.SOURCE_REMOVE
 
     def _on_cloud_sync_error(self, _engine, message: str) -> None:
         self._cloud_had_sync_error = True

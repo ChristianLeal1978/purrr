@@ -501,16 +501,36 @@ def get_or_create_album(name: str, artist: str | None = None) -> int:
     la canción sin que el usuario lo revise, y dos artistas distintos con un álbum del mismo
     nombre (p. ej. "Greatest Hits") son moneda corriente."""
     conn = get_connection()
+    # Un álbum borrado (soft-delete) que llegó a duplicarse por una carrera de sync entre
+    # dispositivos (ver `merge_duplicate_albums`) puede dejar más de una fila con el mismo
+    # nombre+artista. El ORDER BY prefiere una fila viva si hay una, y si no hay ninguna,
+    # la de `uuid` más chico — el mismo criterio determinista de `merge_duplicate_albums`,
+    # para que dos dispositivos reactivando el mismo álbum converjan en la misma fila.
     if artist:
         row = conn.execute(
-            "SELECT id FROM albums WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE",
+            "SELECT id, deleted_at FROM albums WHERE name = ? COLLATE NOCASE AND artist = ? COLLATE NOCASE "
+            "ORDER BY deleted_at IS NOT NULL, uuid LIMIT 1",
             (name, artist),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT id FROM albums WHERE name = ? COLLATE NOCASE AND artist IS NULL", (name,)
+            "SELECT id, deleted_at FROM albums WHERE name = ? COLLATE NOCASE AND artist IS NULL "
+            "ORDER BY deleted_at IS NOT NULL, uuid LIMIT 1",
+            (name,),
         ).fetchone()
     if row is not None:
+        if row["deleted_at"] is not None:
+            # El match encontrado está borrado (soft-delete propagado por sync, p. ej. de
+            # `merge_duplicate_albums` en otro dispositivo) — sin este chequeo se reusaba
+            # su id igual, "agregando" canciones a un álbum invisible para siempre: el toast
+            # decía éxito (o "0 canciones" si ya estaban) y el álbum nunca aparecía en la
+            # vista Álbumes, que filtra `deleted_at IS NULL`.
+            conn.execute(
+                "UPDATE albums SET deleted_at = NULL, updated_at = datetime('now') WHERE id = ?",
+                (row["id"],),
+            )
+            _enqueue_sync_op(conn, "albums", {"uuid": _album_uuid(conn, row["id"]), "name": name, "artist": artist})
+            conn.commit()
         return row["id"]
     album_uuid = str(uuid_lib.uuid4())
     cursor = conn.execute(
@@ -519,6 +539,10 @@ def get_or_create_album(name: str, artist: str | None = None) -> int:
     _enqueue_sync_op(conn, "albums", {"uuid": album_uuid, "name": name, "artist": artist})
     conn.commit()
     return cursor.lastrowid
+
+
+def _album_uuid(conn: sqlite3.Connection, album_id: int) -> str:
+    return conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()["uuid"]
 
 
 def _backfill_album_art(conn: sqlite3.Connection, album_id: int) -> None:
@@ -541,18 +565,34 @@ def _backfill_album_art(conn: sqlite3.Connection, album_id: int) -> None:
 
 
 def add_tracks_to_album(album_id: int, track_ids: list[int]) -> int:
-    """Agrega canciones a un álbum (ignora las que ya estaban). Devuelve cuántas se sumaron."""
+    """Agrega canciones a un álbum (ignora las que ya estaban). Devuelve cuántas se sumaron.
+
+    Si la fila ya existe pero con `deleted_at` puesto (se quitó del álbum antes, acá o por
+    sync), un `INSERT OR IGNORE` choca con el UNIQUE(album_id, track_id) y no hace nada — la
+    canción queda "agregada" en el UI pero invisible para siempre. Por eso se revisa primero:
+    fila nueva se inserta, fila borrada se revive limpiando `deleted_at`."""
     conn = get_connection()
     added = 0
     added_track_ids = []
     for track_id in track_ids:
-        cursor = conn.execute(
-            "INSERT OR IGNORE INTO album_tracks (album_id, track_id) VALUES (?, ?)",
+        existing = conn.execute(
+            "SELECT id, deleted_at FROM album_tracks WHERE album_id = ? AND track_id = ?",
             (album_id, track_id),
-        )
-        if cursor.rowcount:
-            added += 1
-            added_track_ids.append(track_id)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO album_tracks (album_id, track_id, updated_at) VALUES (?, ?, datetime('now'))",
+                (album_id, track_id),
+            )
+        elif existing["deleted_at"] is not None:
+            conn.execute(
+                "UPDATE album_tracks SET deleted_at = NULL, updated_at = datetime('now') WHERE id = ?",
+                (existing["id"],),
+            )
+        else:
+            continue
+        added += 1
+        added_track_ids.append(track_id)
     if added_track_ids:
         album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()
         conn.execute("UPDATE albums SET updated_at = datetime('now') WHERE id = ?", (album_id,))
@@ -613,12 +653,19 @@ def merge_duplicate_albums() -> int:
     compilación (soundtrack, tributo — un artista distinto por pista) a álbumes creaba un
     álbum de una sola canción por cada artista, en vez de un único álbum (ver
     `ui/window.py:_add_tracks_to_album_by_metadata`, que ya no agrupa por artista de pista).
-    Junta esos álbumes por nombre, movi��ndole las canciones al más antiguo del grupo y
-    borrando (soft-delete, sincronizado) los demás. Se llama en cada arranque — sin
-    duplicados que fusionar, es no-op. Devuelve cuántos álbumes se fusionaron/eliminaron."""
+    Junta esos álbumes por nombre, moviéndole las canciones a uno solo del grupo y borrando
+    (soft-delete, sincronizado) los demás. Se llama en cada arranque — sin duplicados que
+    fusionar, es no-op. Devuelve cuántos álbumes se fusionaron/eliminaron.
+
+    El "canónico" del grupo se elige por `uuid` (no por `id` local): dos dispositivos que ven
+    el mismo grupo de duplicados por sync deben llegar al MISMO ganador sin coordinarse, o
+    cada uno borra el que el otro dejó vivo — un vaivén que en la práctica podía terminar
+    borrando las dos copias. `id` es un autoincremental de SQLite propio de cada base, así que
+    comparar por `id` no garantiza esa coincidencia; `uuid` sí, porque es el mismo dato en
+    todos los dispositivos para la fila que representa el mismo álbum."""
     conn = get_connection()
     albums = conn.execute(
-        "SELECT id, uuid, name, artist FROM albums WHERE deleted_at IS NULL ORDER BY id"
+        "SELECT id, uuid, name, artist FROM albums WHERE deleted_at IS NULL ORDER BY uuid"
     ).fetchall()
 
     groups: dict[str, list[sqlite3.Row]] = {}
