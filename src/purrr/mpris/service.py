@@ -3,6 +3,8 @@ Powerzoid Music o cualquier otro cliente MPRIS estándar pueda ver y controlar a
 mismo protocolo que ya usan Spotify y la mayoría de reproductores en Linux.
 """
 
+import re
+
 import gi
 
 gi.require_version("Gio", "2.0")
@@ -67,6 +69,17 @@ _INTROSPECTION_XML = """
   </interface>
 </node>
 """
+
+
+def _sanitize_object_path_element(value: object) -> str:
+    """Los track_id de radios en vivo llevan el formato "station:<provider>:<slug>"
+    (ver playback_bar.py:_publish_now_playing) — los dos puntos no son válidos en un
+    componente de object path de D-Bus. GLib.Variant("o", ...) lanza una excepción con
+    caracteres fuera de [A-Za-z0-9_], y como eso ocurre dentro del getter de la
+    propiedad Metadata, GLib la descarta en silencio de GetAll/Get sin avisar — el
+    cliente MPRIS (ej. Powerzoid Music) simplemente deja de recibir título/artista
+    para cualquier radio."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", str(value))
 
 
 class MprisService:
@@ -196,7 +209,7 @@ class MprisService:
         if item is None:
             return {}
         result = {
-            "mpris:trackid": GLib.Variant("o", f"/org/purrr/track/{item.track_id}"),
+            "mpris:trackid": GLib.Variant("o", f"/org/purrr/track/{_sanitize_object_path_element(item.track_id)}"),
             "xesam:title": GLib.Variant("s", item.title),
         }
         if item.artist:
