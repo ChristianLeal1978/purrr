@@ -619,7 +619,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         confirm_action(
             self,
             heading="¿Eliminar álbum de la biblioteca?",
-            body=f'"{album_name}" se quitará de tus álbumes. Los archivos de las canciones no se eliminan.',
+            body=(
+                f'"{album_name}" se quitará de tus álbumes en este equipo y en el resto de '
+                "tus dispositivos sincronizados. Los archivos de las canciones no se eliminan."
+            ),
             confirm_label="Eliminar",
             on_confirm=on_confirm,
         )
@@ -932,6 +935,7 @@ class PurrrWindow(Adw.ApplicationWindow):
             self._on_playlist_selected(self._sidebar, self._current_playlist_id)
 
     def _on_cloud_albums_changed(self, _engine) -> None:
+        database.merge_duplicate_albums()
         self._albums_view.refresh(database.list_albums())
 
     def _on_cloud_sync_error(self, _engine, message: str) -> None:
