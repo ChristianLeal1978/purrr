@@ -90,6 +90,21 @@ headerbar.flat {
 
 /* --- Cuadrícula de canales de RadioTunes (ui/stations_view.py) ------------ */
 
+/* El FlowBox es `homogeneous=True`: todas las celdas miden lo mismo que la más
+   ancha. Sin este reseteo, el padding por defecto del tema (botón + flowboxchild)
+   sumaba bastante más que el ancho real de la carátula (_TILE_SIZE), y la grilla
+   terminaba con muy pocas columnas y un aire enorme alrededor de cada cuadrado. */
+.purrr-station-grid > flowboxchild {
+    padding: 0;
+    min-width: 0;
+}
+
+.purrr-station-tile-button {
+    padding: 0;
+    min-width: 0;
+    min-height: 0;
+}
+
 .purrr-station-tile-art {
     background-color: @purrr_surface_alt;
     border-radius: 12px;

@@ -39,7 +39,10 @@ class _StationTile(Gtk.Button):
     cuadro vacío."""
 
     def __init__(self, station: Station, emitter: GObject.Object):
-        super().__init__(has_frame=False, css_classes=["flat"], tooltip_text=station.display_name)
+        super().__init__(
+            has_frame=False, css_classes=["flat", "purrr-station-tile-button"],
+            tooltip_text=station.display_name,
+        )
         self.slug = station.slug
         self.connect("clicked", lambda _b, s=station: emitter.emit("station-activated", s))
 
@@ -232,12 +235,13 @@ class RadioTunesView(Gtk.Box):
         # Cuadrícula (no lista): cada canal es un cuadrado con su carátula — ver
         # _StationTile más arriba.
         self._grid = Gtk.FlowBox(
+            css_classes=["purrr-station-grid"],
             selection_mode=Gtk.SelectionMode.NONE,
             homogeneous=True,
-            column_spacing=16,
+            column_spacing=12,
             row_spacing=16,
             min_children_per_line=2,
-            max_children_per_line=8,
+            max_children_per_line=10,
         )
         grid_scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=320)
         grid_scrolled.set_child(self._grid)

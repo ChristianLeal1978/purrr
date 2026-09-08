@@ -256,6 +256,11 @@ def _push_album(client, payload: dict) -> None:
         "name": payload["name"],
         "artist": payload.get("artist"),
         "updated_at": _now_iso(),
+        # Sin esto, revivir un álbum borrado (ver `database.get_or_create_album`) no
+        # limpiaba `deleted_at` en remoto — Postgrest solo pisa las columnas presentes
+        # en el upsert — así que el próximo pull/realtime bajaba el eco de este mismo
+        # push todavía marcado como borrado, y la revivida local se deshacía sola.
+        "deleted_at": None,
     }
     art_local_path = payload.get("art_local_path")
     if art_local_path and Path(art_local_path).exists():
