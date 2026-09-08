@@ -4,29 +4,26 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GObject, Gtk
 
-from purrr.spotify.track import SpotifyTrack
-from purrr.ui.markup import escape
-
-_MAX_LOG_LINES = 20
-
 
 class SpotifyView(Gtk.ScrolledWindow):
     """Pantalla 'Spotify': conectar la cuenta (PKCE, sin contraseña que pasar por acá)
-    y buscar canciones para reproducir por Spotify Connect o agregar a una playlist
-    mixta. Mismo estilo que `ui/first_run.py`/`ui/cloud_settings.py`.
+    para controlar Spotify Connect desde Purrr. Mismo estilo que
+    `ui/first_run.py`/`ui/cloud_settings.py`.
+
+    La búsqueda de canciones se sacó (ver commit) porque `/v1/search` no funciona para
+    apps personales en modo Development desde el cambio de política de Spotify de
+    noviembre 2024 — solo apps con Extended Quota Mode tienen acceso al catálogo, y
+    Spotify no lo otorga para apps de uso individual.
 
     Envuelta en un ScrolledWindow (a diferencia de esas otras dos): sin conexión Spotify
     Connect, la lista de dispositivos queda vacía y el contenido es corto, pero con la
-    ventana achicada o varios resultados de búsqueda el bloque entero (client ID + login +
-    búsqueda + dispositivos) puede superar el alto disponible — antes quedaba cortado
-    abajo sin ninguna forma de bajar a ver el resto."""
+    ventana achicada el bloque entero (client ID + login + dispositivos) puede superar
+    el alto disponible — antes quedaba cortado abajo sin ninguna forma de bajar a ver
+    el resto."""
 
     __gsignals__ = {
         "client-id-save-requested": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         "connect-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
-        "search-requested": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        "play-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # SpotifyTrack
-        "add-to-playlist-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # SpotifyTrack
     }
 
     def __init__(self):
@@ -39,7 +36,6 @@ class SpotifyView(Gtk.ScrolledWindow):
 
         self._build_client_id_step()
         self._build_connect_step()
-        self._build_search_step()
         self._build_devices_section()
 
         self.set_client_configured(False)
@@ -87,38 +83,6 @@ class SpotifyView(Gtk.ScrolledWindow):
         self._connect_page.set_child(connect_button)
         self._box.append(self._connect_page)
 
-    # --- Paso 3: búsqueda -----------------------------------------------------
-
-    def _build_search_step(self) -> None:
-        self._search_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self._search_entry = Gtk.SearchEntry(placeholder_text="Buscar canciones en Spotify")
-        self._search_entry.connect("activate", lambda entry: self.emit("search-requested", entry.get_text()))
-        self._search_box.append(self._search_entry)
-
-        self._results_list = Gtk.ListBox(css_classes=["boxed-list"])
-        scrolled = Gtk.ScrolledWindow(vexpand=True, min_content_height=240)
-        scrolled.set_child(self._results_list)
-        self._search_box.append(scrolled)
-        self._box.append(self._search_box)
-
-    def show_results(self, tracks: list[SpotifyTrack]) -> None:
-        while row := self._results_list.get_row_at_index(0):
-            self._results_list.remove(row)
-        for track in tracks:
-            subtitle = f"{track.artist or ''} — {track.album or ''}".strip(" —")
-            row = Adw.ActionRow(title=escape(track.title), subtitle=escape(subtitle))
-            play_button = Gtk.Button(
-                icon_name="media-playback-start-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Reproducir"
-            )
-            play_button.connect("clicked", lambda _b, t=track: self.emit("play-requested", t))
-            add_button = Gtk.Button(
-                icon_name="list-add-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Agregar a playlist"
-            )
-            add_button.connect("clicked", lambda _b, t=track: self.emit("add-to-playlist-requested", t))
-            row.add_suffix(play_button)
-            row.add_suffix(add_button)
-            self._results_list.append(row)
-
     # --- Dispositivos Spotify Connect (solo lectura) --------------------------
 
     def _build_devices_section(self) -> None:
@@ -159,6 +123,5 @@ class SpotifyView(Gtk.ScrolledWindow):
 
     def set_authenticated(self, authenticated: bool) -> None:
         self._connect_page.set_visible(not authenticated)
-        self._search_box.set_visible(authenticated)
         self._devices_header.set_visible(authenticated)
         self._devices_box.set_visible(authenticated)

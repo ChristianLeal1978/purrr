@@ -30,7 +30,6 @@ from purrr.player.sources import rainwave as rainwave_source
 from purrr.player.sources import smoothjazz as smoothjazz_source
 from purrr.player.station import Station
 from purrr.spotify import client as spotify_client
-from purrr.spotify.track import SpotifyTrack
 from purrr.sync.controller import SyncController
 from purrr.ui.album_dialogs import open_cover_approval_dialog
 from purrr.ui.albums_view import AlbumsView
@@ -43,7 +42,6 @@ from purrr.ui.library_view import LibraryView
 from purrr.ui.library_view import TrackObject as LibraryTrackObject
 from purrr.ui.mood_view import MoodView
 from purrr.ui.playback_bar import PlaybackBar
-from purrr.ui.playlist_picker import open_playlist_picker
 from purrr.ui.playlist_view import PlaylistView
 from purrr.ui.sidebar import Sidebar
 from purrr.ui.spotify_view import SpotifyView
@@ -227,9 +225,6 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._spotify_view.connect("client-id-save-requested", self._on_spotify_client_id_save_requested)
         self._spotify_view.connect("connect-requested", self._on_spotify_connect_requested)
-        self._spotify_view.connect("search-requested", self._on_spotify_search_requested)
-        self._spotify_view.connect("play-requested", self._on_spotify_play_requested)
-        self._spotify_view.connect("add-to-playlist-requested", self._on_spotify_add_to_playlist_requested)
 
         self._mood_view.connect("analyze-library-requested", self._on_analyze_library_requested)
         self._mood_view.connect("search-requested", self._on_mood_search_requested)
@@ -1026,42 +1021,6 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _on_spotify_connected_success(self) -> bool:
         self._refresh_spotify_view()
         self._toast("Cuenta de Spotify conectada.")
-        return False
-
-    def _on_spotify_search_requested(self, _view, query: str) -> None:
-        if not query.strip():
-            return
-
-        def worker() -> None:
-            try:
-                results = spotify_client.search_tracks(query)
-            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
-                GLib.idle_add(self._toast, f"No se pudo buscar en Spotify: {exc}")
-                return
-            GLib.idle_add(self._spotify_view.show_results, results)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_spotify_play_requested(self, _view, track: SpotifyTrack) -> None:
-        self._playback_bar.play_spotify_track(track)
-
-    def _on_spotify_add_to_playlist_requested(self, _view, track: SpotifyTrack) -> None:
-        def worker() -> None:
-            try:
-                spotify_client.cache_spotify_track(track)
-            except Exception as exc:  # noqa: BLE001 — se reporta a la UI
-                GLib.idle_add(self._toast, f"No se pudo agregar la canción: {exc}")
-                return
-            GLib.idle_add(self._open_spotify_playlist_picker, track)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _open_spotify_playlist_picker(self, track: SpotifyTrack) -> bool:
-        def on_chosen(playlist_id: int) -> None:
-            database.add_spotify_track_to_playlist(playlist_id, track.id)
-            self._toast(f'"{track.title}" agregada a la playlist.')
-
-        open_playlist_picker(self, on_chosen)
         return False
 
     # --- Ánimo (Fase 5) --------------------------------------------------
