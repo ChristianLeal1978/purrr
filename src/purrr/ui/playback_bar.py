@@ -90,6 +90,7 @@ class PlaybackBar(Gtk.Box):
 
         # --- Carátula: grande, centrada arriba del panel -----------------------
         self._current_art_path: str | None = None
+        self._art_decode_token: object | None = None
 
         self._art_picture = Gtk.Picture(
             content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=False, vexpand=False
@@ -425,14 +426,38 @@ class PlaybackBar(Gtk.Box):
 
     def _update_art(self, art_path: str | None) -> None:
         self._current_art_path = art_path
+        token = object()
+        self._art_decode_token = token
         if art_path and Path(art_path).exists():
-            texture = load_texture_at_size(art_path, _ART_THUMB_SIZE, self._art_picture.get_scale_factor())
-            if texture:
-                self._art_picture.set_paintable(texture)
-                self._art_button.set_sensitive(True)
-                return
-        self._art_picture.set_paintable(None)
-        self._art_button.set_sensitive(False)
+            # Decodificar acá mismo (Pixbuf.new_from_file_at_size) bloqueaba el hilo de
+            # la UI en cada cambio de canción — con carátulas grandes (sobre todo desde
+            # que se pide al tamaño físico real de la pantalla, no solo el lógico) el GTK
+            # main loop se queda sin procesar eventos el tiempo suficiente como para que
+            # el sistema operativo crea que Purrr se colgó, aunque el audio ya haya
+            # arrancado (GStreamer corre en su propio hilo). Se decodifica en un hilo
+            # aparte y solo se toca el widget desde el main loop, vía GLib.idle_add.
+            scale = self._art_picture.get_scale_factor()
+            threading.Thread(
+                target=self._decode_art_thread, args=(art_path, scale, token), daemon=True
+            ).start()
+        else:
+            self._art_picture.set_paintable(None)
+            self._art_button.set_sensitive(False)
+
+    def _decode_art_thread(self, art_path: str, scale: int, token: object) -> None:
+        texture = load_texture_at_size(art_path, _ART_THUMB_SIZE, scale)
+        GLib.idle_add(self._on_art_decoded, texture, token)
+
+    def _on_art_decoded(self, texture, token: object) -> bool:
+        if token is not self._art_decode_token:
+            return GLib.SOURCE_REMOVE  # ya se pidió otra carátula mientras esta decodificaba
+        if texture:
+            self._art_picture.set_paintable(texture)
+            self._art_button.set_sensitive(True)
+        else:
+            self._art_picture.set_paintable(None)
+            self._art_button.set_sensitive(False)
+        return GLib.SOURCE_REMOVE
 
     def _on_art_clicked(self, button: Gtk.Button) -> None:
         if not self._current_art_path or not Path(self._current_art_path).exists():
