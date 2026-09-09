@@ -109,10 +109,13 @@ def _load_tile_art(tile: _StationTile, station: Station, on_ready) -> None:
     tocar widgets)."""
     if not station.art_url:
         return
+    # Se pide en el hilo principal (get_scale_factor() no es seguro desde `worker`, que corre
+    # en un hilo aparte) y se captura para las dos llamadas a load_texture_at_size de abajo.
+    scale = tile.get_scale_factor()
     ext = Path(urllib.parse.urlparse(station.art_url).path).suffix or ".jpg"
     cache_path = cache_manager.art_cache_path(f"radiotunes-{station.slug}", ext)
     if cache_path.exists():
-        texture = load_texture_at_size(str(cache_path), _TILE_SIZE)
+        texture = load_texture_at_size(str(cache_path), _TILE_SIZE, scale)
         if texture:
             tile.set_art_texture(texture)
         return
@@ -126,7 +129,7 @@ def _load_tile_art(tile: _StationTile, station: Station, on_ready) -> None:
             return
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(data)
-        texture = load_texture_at_size(str(cache_path), _TILE_SIZE)
+        texture = load_texture_at_size(str(cache_path), _TILE_SIZE, scale)
         if texture:
             GLib.idle_add(on_ready, texture)
 

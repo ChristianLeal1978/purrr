@@ -231,7 +231,10 @@ class AlbumsView(Gtk.Box):
         )
         picture = overlay.get_child()
 
-        texture = load_texture_at_size(album.art_path, _ART_SIZE) if album.has_art() else None
+        texture = (
+            load_texture_at_size(album.art_path, _ART_SIZE, picture.get_scale_factor())
+            if album.has_art() else None
+        )
         picture.set_paintable(texture)
         list_item.purrr_art_button.set_visible(not album.has_art())
 

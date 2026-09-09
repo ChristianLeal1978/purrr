@@ -426,7 +426,7 @@ class PlaybackBar(Gtk.Box):
     def _update_art(self, art_path: str | None) -> None:
         self._current_art_path = art_path
         if art_path and Path(art_path).exists():
-            texture = load_texture_at_size(art_path, _ART_THUMB_SIZE)
+            texture = load_texture_at_size(art_path, _ART_THUMB_SIZE, self._art_picture.get_scale_factor())
             if texture:
                 self._art_picture.set_paintable(texture)
                 self._art_button.set_sensitive(True)
@@ -437,7 +437,7 @@ class PlaybackBar(Gtk.Box):
     def _on_art_clicked(self, button: Gtk.Button) -> None:
         if not self._current_art_path or not Path(self._current_art_path).exists():
             return
-        texture = load_texture_at_size(self._current_art_path, _ART_EXPANDED_SIZE)
+        texture = load_texture_at_size(self._current_art_path, _ART_EXPANDED_SIZE, self.get_scale_factor())
         if not texture:
             return
         picture = Gtk.Picture(

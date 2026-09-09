@@ -326,7 +326,10 @@ class LibraryView(Gtk.Box):
         hero.append(text_box)
 
         art_path = row["art_path"]
-        texture = load_texture_at_size(art_path, _DASHBOARD_ART_SIZE) if art_path and Path(art_path).exists() else None
+        texture = (
+            load_texture_at_size(art_path, _DASHBOARD_ART_SIZE, self.get_scale_factor())
+            if art_path and Path(art_path).exists() else None
+        )
         if texture:
             picture = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True)
             picture.set_size_request(_DASHBOARD_ART_SIZE, _DASHBOARD_ART_SIZE)
@@ -340,7 +343,10 @@ class LibraryView(Gtk.Box):
         tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, width_request=_AVATAR_SIZE + 16)
 
         art_path = art_row["art_path"] if art_row else None
-        texture = load_texture_at_size(art_path, _AVATAR_SIZE) if art_path and Path(art_path).exists() else None
+        texture = (
+            load_texture_at_size(art_path, _AVATAR_SIZE, self.get_scale_factor())
+            if art_path and Path(art_path).exists() else None
+        )
         if texture:
             avatar = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True)
             avatar.set_size_request(_AVATAR_SIZE, _AVATAR_SIZE)
@@ -378,7 +384,10 @@ class LibraryView(Gtk.Box):
 
     def _build_recent_row(self, rank: int, row: sqlite3.Row) -> Gtk.Widget:
         art_path = row["art_path"]
-        texture = load_texture_at_size(art_path, _RECENT_THUMB_SIZE) if art_path and Path(art_path).exists() else None
+        texture = (
+            load_texture_at_size(art_path, _RECENT_THUMB_SIZE, self.get_scale_factor())
+            if art_path and Path(art_path).exists() else None
+        )
         if texture:
             thumb = Gtk.Picture(paintable=texture, content_fit=Gtk.ContentFit.COVER, can_shrink=True)
         else:
