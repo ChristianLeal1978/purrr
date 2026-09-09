@@ -475,9 +475,15 @@ def _download_shared_album_art(album_id: int, storage_path: str, engine) -> None
 
     def apply_locally() -> bool:
         # SQL directo, no `database.update_album_art` — esa función encola un push
-        # (Fase 2.2) y volver a subir lo que se acaba de bajar sería un eco.
+        # (Fase 2.2) y volver a subir lo que se acaba de bajar sería un eco. Igual
+        # se marca `art_is_custom`: lo único que se sincroniza es la carátula
+        # elegida a mano (ver `update_album_art`), así que debe seguir ganándole
+        # a la embebida/de carpeta de cada pista también en este dispositivo.
         conn = database.get_connection()
-        conn.execute("UPDATE albums SET art_path = ? WHERE id = ?", (str(path), album_id))
+        conn.execute(
+            "UPDATE albums SET art_path = ?, art_is_custom = 1 WHERE id = ?",
+            (str(path), album_id),
+        )
         conn.commit()
         engine.emit("albums-changed")
         return GLib.SOURCE_REMOVE

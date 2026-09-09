@@ -4,7 +4,7 @@ import threading
 import uuid as uuid_lib
 from importlib import resources
 
-from purrr.config import DB_PATH
+from purrr.config import ALBUM_ART_CACHE_DIR, DB_PATH
 from purrr.drive.scanner import DriveFile
 from purrr.metadata.extractor import PartialMetadata, TrackMetadata
 
@@ -43,6 +43,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "albums": {
         "uuid": "ALTER TABLE albums ADD COLUMN uuid TEXT",
         "deleted_at": "ALTER TABLE albums ADD COLUMN deleted_at TEXT",
+        "art_is_custom": "ALTER TABLE albums ADD COLUMN art_is_custom INTEGER NOT NULL DEFAULT 0",
     },
     "album_tracks": {
         "updated_at": "ALTER TABLE album_tracks ADD COLUMN updated_at TEXT",
@@ -61,8 +62,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
     _backfill_uuids(conn)
     _backfill_album_tracks_updated_at(conn)
+    _backfill_art_is_custom(conn)
     _migrate_playlist_tracks_to_items(conn)
     _repair_orphaned_cloud_pushes(conn)
+
+
+def _backfill_art_is_custom(conn: sqlite3.Connection) -> None:
+    """`art_is_custom` no existía antes de esta migración, así que todo álbum ya
+    guardado quedó en el default 0 aunque su carátula sí sea una elegida a mano
+    (buscada en iTunes o subida). Se la puede reconocer sin ambigüedad por la
+    carpeta: `_backfill_album_art` solo copia el `art_path` de una canción (que
+    vive en `ART_CACHE_DIR`), nunca escribe en `ALBUM_ART_CACHE_DIR` — esa carpeta
+    solo la usan `update_album_art` y la descarga de una carátula compartida por
+    sync, ambas ya "a mano" por definición."""
+    conn.execute(
+        "UPDATE albums SET art_is_custom = 1 "
+        "WHERE art_is_custom = 0 AND art_path LIKE ?",
+        (f"{ALBUM_ART_CACHE_DIR}/%",),
+    )
+    conn.commit()
 
 
 def _backfill_album_tracks_updated_at(conn: sqlite3.Connection) -> None:
@@ -709,10 +727,15 @@ def update_album_art(album_id: int, art_path: str) -> None:
     """Única mutación de `albums` que hasta la Fase 2 no encolaba sync — una
     carátula buscada en iTunes o subida a mano es la única que de verdad conviene
     compartir entre dispositivos (ver el plan): la embebida o de carpeta de Drive
-    cualquier dispositivo la deriva sola de su propio escaneo."""
+    cualquier dispositivo la deriva sola de su propio escaneo.
+
+    Marca `art_is_custom` para que esta carátula elegida a mano tenga prioridad
+    sobre la embebida/de carpeta de cada canción al mostrarse (ver
+    `list_album_tracks`) — a diferencia de la que `_backfill_album_art` copia
+    en automático de una canción, que no debe pisar la propia de cada pista."""
     conn = get_connection()
     conn.execute(
-        "UPDATE albums SET art_path = ?, updated_at = datetime('now') WHERE id = ?",
+        "UPDATE albums SET art_path = ?, art_is_custom = 1, updated_at = datetime('now') WHERE id = ?",
         (art_path, album_id),
     )
     album_row = conn.execute(
@@ -749,13 +772,19 @@ def list_albums() -> list[sqlite3.Row]:
 
 
 def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
-    # COALESCE(t.art_path, a.art_path) va primero en el SELECT: sqlite3.Row resuelve
-    # nombres de columna repetidos por orden de aparición, así que `row["art_path"]`
-    # devuelve este valor y no el de `t.*` que viene después. Así, una canción sin
-    # carátula propia (embebida/carpeta) muestra la del álbum armado a mano al sonar.
+    # La expresión de art_path va primero en el SELECT: sqlite3.Row resuelve nombres
+    # de columna repetidos por orden de aparición, así que `row["art_path"]` devuelve
+    # este valor y no el de `t.*` que viene después.
+    #
+    # Si el álbum tiene una carátula elegida a mano (`art_is_custom`, buscada en
+    # iTunes o subida por el usuario), esa gana siempre — es una elección explícita
+    # y debe verse en vez de la embebida/de carpeta de cada pista. Si no, se mantiene
+    # el comportamiento de antes: la propia de la canción primero, y la del álbum
+    # (heredada en automático por `_backfill_album_art`) solo como resguardo.
     return get_connection().execute(
         """
-        SELECT COALESCE(t.art_path, a.art_path) AS art_path, t.*
+        SELECT CASE WHEN a.art_is_custom = 1 THEN COALESCE(a.art_path, t.art_path)
+                    ELSE COALESCE(t.art_path, a.art_path) END AS art_path, t.*
         FROM tracks t
         JOIN album_tracks atk ON atk.track_id = t.id AND atk.deleted_at IS NULL
         JOIN albums a ON a.id = atk.album_id
