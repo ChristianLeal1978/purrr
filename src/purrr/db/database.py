@@ -35,6 +35,9 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "sources": {
         "provider": "ALTER TABLE sources ADD COLUMN provider TEXT NOT NULL DEFAULT 'drive'",
+        "uuid": "ALTER TABLE sources ADD COLUMN uuid TEXT",
+        "updated_at": "ALTER TABLE sources ADD COLUMN updated_at TEXT",
+        "deleted_at": "ALTER TABLE sources ADD COLUMN deleted_at TEXT",
     },
     "playlists": {
         "uuid": "ALTER TABLE playlists ADD COLUMN uuid TEXT",
@@ -61,6 +64,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 conn.execute(statement)
     conn.commit()
     _backfill_uuids(conn)
+    _backfill_source_uuids(conn)
     _backfill_album_tracks_updated_at(conn)
     _backfill_art_is_custom(conn)
     _migrate_playlist_tracks_to_items(conn)
@@ -145,6 +149,34 @@ def _backfill_uuids(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _backfill_source_uuids(conn: sqlite3.Connection) -> None:
+    """Igual que `_backfill_uuids`, pero para `sources` (agregada al sync después: no
+    encajaba en ese helper porque no tiene `artist` ni el resto de las columnas de
+    playlists/albums). Las fuentes agregadas antes de este cambio no tenían `uuid` ni
+    `updated_at` — sin esto, nunca se enteraría el otro dispositivo de que existen."""
+    rows = conn.execute(
+        "SELECT id, drive_folder_id, display_name, added_at FROM sources WHERE uuid IS NULL"
+    ).fetchall()
+    for row in rows:
+        new_uuid = str(uuid_lib.uuid4())
+        conn.execute(
+            "UPDATE sources SET uuid = ?, updated_at = ? WHERE id = ?",
+            (new_uuid, row["added_at"], row["id"]),
+        )
+        _enqueue_sync_op(
+            conn,
+            "sources",
+            {
+                "uuid": new_uuid,
+                "drive_folder_id": row["drive_folder_id"],
+                "display_name": row["display_name"],
+            },
+        )
+    conn.execute("UPDATE sources SET updated_at = added_at WHERE updated_at IS NULL")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_uuid ON sources(uuid)")
+    conn.commit()
+
+
 def _repair_orphaned_cloud_pushes(conn: sqlite3.Connection) -> None:
     """Reparación de una sola vez (2026-09): antes de este fix, `_backfill_uuids`
     nunca encolaba el push del álbum/playlist en sí, así que cualquier fila creada
@@ -198,10 +230,22 @@ def _track_ref(track: sqlite3.Row) -> str:
 
 def upsert_source(drive_folder_id: str, display_name: str) -> int:
     conn = get_connection()
+    existing = conn.execute(
+        "SELECT uuid FROM sources WHERE drive_folder_id = ?", (drive_folder_id,)
+    ).fetchone()
+    source_uuid = existing["uuid"] if existing is not None and existing["uuid"] else str(uuid_lib.uuid4())
     conn.execute(
-        "INSERT INTO sources (drive_folder_id, display_name) VALUES (?, ?) "
-        "ON CONFLICT(drive_folder_id) DO UPDATE SET display_name = excluded.display_name",
-        (drive_folder_id, display_name),
+        "INSERT INTO sources (drive_folder_id, display_name, uuid, updated_at) "
+        "VALUES (?, ?, ?, datetime('now')) "
+        "ON CONFLICT(drive_folder_id) DO UPDATE SET "
+        "display_name = excluded.display_name, uuid = COALESCE(sources.uuid, excluded.uuid), "
+        "deleted_at = NULL, updated_at = excluded.updated_at",
+        (drive_folder_id, display_name, source_uuid),
+    )
+    _enqueue_sync_op(
+        conn,
+        "sources",
+        {"uuid": source_uuid, "drive_folder_id": drive_folder_id, "display_name": display_name},
     )
     conn.commit()
     row = conn.execute(
@@ -219,12 +263,40 @@ def touch_source_scanned(source_id: int) -> None:
 
 
 def list_sources() -> list[sqlite3.Row]:
-    return get_connection().execute("SELECT * FROM sources ORDER BY display_name").fetchall()
+    return get_connection().execute(
+        "SELECT * FROM sources WHERE deleted_at IS NULL ORDER BY display_name"
+    ).fetchall()
+
+
+def get_source_by_uuid(source_uuid: str) -> sqlite3.Row | None:
+    return get_connection().execute(
+        "SELECT * FROM sources WHERE uuid = ?", (source_uuid,)
+    ).fetchone()
+
+
+def get_source_by_drive_folder_id(drive_folder_id: str) -> sqlite3.Row | None:
+    return get_connection().execute(
+        "SELECT * FROM sources WHERE drive_folder_id = ?", (drive_folder_id,)
+    ).fetchone()
 
 
 def delete_source(source_id: int) -> None:
+    """Soft-delete: la fila se conserva con `deleted_at` para propagar el borrado a
+    los demás dispositivos por sync — que ahí sí borran de verdad las canciones de
+    esta fuente (ver `cloud/sync_engine.py:_apply_source`). Acá mismo, en cambio, se
+    borran ya (`ON DELETE CASCADE` limpia además `album_tracks`/`track_plays`/
+    `track_mood` de esas canciones) — no tiene sentido dejarlas tombstoned si el
+    usuario las está sacando de su biblioteca activamente."""
     conn = get_connection()
-    conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+    row = conn.execute("SELECT uuid FROM sources WHERE id = ?", (source_id,)).fetchone()
+    conn.execute("DELETE FROM tracks WHERE source_id = ?", (source_id,))
+    conn.execute(
+        "UPDATE sources SET deleted_at = datetime('now'), updated_at = datetime('now') "
+        "WHERE id = ?",
+        (source_id,),
+    )
+    if row is not None and row["uuid"] is not None:
+        _enqueue_sync_op(conn, "sources", {"uuid": row["uuid"], "deleted": True})
     conn.commit()
 
 

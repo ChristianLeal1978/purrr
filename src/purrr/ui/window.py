@@ -77,6 +77,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         # refresco (con prioridad baja, para que corra después de vaciarse la cola).
         self._albums_refresh_pending = False
         self._playlists_refresh_pending = False
+        self._sources_refresh_pending = False
         self._stats_refresh_pending = False
         self._mood_controller = MoodAnalysisController()
         self._current_playlist_id: int | None = None
@@ -244,6 +245,8 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         self._cloud_sync_engine.connect("playlists-changed", self._on_cloud_playlists_changed)
         self._cloud_sync_engine.connect("albums-changed", self._on_cloud_albums_changed)
+        self._cloud_sync_engine.connect("sources-changed", self._on_cloud_sources_changed)
+        self._cloud_sync_engine.connect("source-scan-requested", self._on_cloud_source_scan_requested)
         self._cloud_sync_engine.connect("stats-changed", self._on_cloud_stats_changed)
         self._cloud_sync_engine.connect("sync-error", self._on_cloud_sync_error)
 
@@ -806,6 +809,11 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.hide_progress()
         self._reload_all()
         self._toast(f"Sincronización completa: {total} canciones encontradas.")
+        # Un álbum/playlist/mood/play que llegó por sync antes de que este escaneo
+        # terminara pudo haberse descartado por no poder resolver todavía el track
+        # (ver cloud/identity.py) — reintenta esas 4 tablas ahora que puede haber
+        # tracks nuevos, en vez de esperar al próximo evento realtime o reinicio.
+        self._cloud_sync_engine.reconcile_pending()
 
     def _on_sync_error(self, _controller, message: str) -> None:
         self._sources_view.hide_progress()
@@ -968,6 +976,27 @@ class PurrrWindow(Adw.ApplicationWindow):
         database.merge_duplicate_albums()
         self._albums_view.refresh(database.list_albums())
         return GLib.SOURCE_REMOVE
+
+    def _on_cloud_sources_changed(self, _engine) -> None:
+        if self._sources_refresh_pending:
+            return
+        self._sources_refresh_pending = True
+        GLib.idle_add(self._flush_sources_refresh, priority=GLib.PRIORITY_LOW)
+
+    def _flush_sources_refresh(self) -> bool:
+        self._sources_refresh_pending = False
+        self._sources_view.refresh_sources(database.list_sources())
+        self._folder_view.refresh(database.list_sources())
+        self._library_view.refresh(database.list_tracks())
+        self._albums_view.refresh(database.list_albums())
+        return GLib.SOURCE_REMOVE
+
+    def _on_cloud_source_scan_requested(self, _engine, folder_id: str, display_name: str) -> None:
+        # `start_scan` ya es no-op si hay otro escaneo en curso (ver
+        # sync/controller.py:_busy) — en ese caso raro (llegó justo mientras el usuario
+        # agregaba/actualizaba otra fuente a mano) la fuente queda agregada pero sin
+        # escanear hasta que el usuario la actualice a mano desde Fuentes.
+        self._sync_controller.start_scan(folder_id, display_name)
 
     def _on_cloud_sync_error(self, _engine, message: str) -> None:
         self._cloud_had_sync_error = True

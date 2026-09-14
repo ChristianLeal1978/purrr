@@ -9,8 +9,8 @@ la escribió. Un hilo "flusher" la drena contra Supabase con reintento simple: s
 implementación *async* — la variante "sync" existe pero cada método lanza
 `NotImplementedError` (confirmado leyendo `realtime/_sync/client.py`). Por eso este
 motor corre un hilo dedicado con su propio event loop de asyncio, suscripto a los
-cambios de Postgres en las 4 tablas sincronizadas; el resto de la app sigue sin usar
-asyncio, igual que hoy. Cada evento recibido se aplica a la base local comparando
+cambios de Postgres en las tablas de `_SYNCED_TABLES`; el resto de la app sigue sin
+usar asyncio, igual que hoy. Cada evento recibido se aplica a la base local comparando
 `updated_at` (last-write-wins) y **sin** volver a encolar un push — si no, un cambio
 recibido por sync rebotaría de vuelta a Supabase en un eco infinito.
 
@@ -31,6 +31,7 @@ import gi
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib, GObject
 
+from purrr.auth.oauth import is_authenticated
 from purrr.cache import manager as cache_manager
 from purrr.cloud import client as cloud_client
 from purrr.cloud import identity
@@ -38,8 +39,13 @@ from purrr.config import SUPABASE_ANON_KEY, SUPABASE_URL
 from purrr.db import database
 
 _SYNCED_TABLES = (
-    "playlists", "playlist_items", "albums", "album_items", "track_moods", "track_plays",
+    "sources", "playlists", "playlist_items", "albums", "album_items", "track_moods",
+    "track_plays",
 )
+# Subconjunto de _SYNCED_TABLES que depende de que el track exista localmente para
+# resolverse (ver identity.resolve_local_track_id) — lo que reintenta `reconcile_pending`
+# tras cada escaneo, además de la próxima vez que llegue por realtime/reinicio.
+_TRACK_DEPENDENT_TABLES = ("album_items", "playlist_items", "track_moods", "track_plays")
 _FLUSH_INTERVAL_SECONDS = 3
 _RECONNECT_DELAY_SECONDS = 5
 
@@ -73,8 +79,13 @@ class CloudSyncEngine(GObject.Object):
     __gsignals__ = {
         "playlists-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "albums-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "sources-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "stats-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "sync-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Una fuente nueva llegó por sync y este dispositivo ya tiene credenciales de
+        # Drive válidas — la UI (dueña de SyncController) es quien dispara el escaneo
+        # real; este módulo no importa nada de Drive (ver _apply_source).
+        "source-scan-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, str)),
     }
 
     def __init__(self):
@@ -139,17 +150,35 @@ class CloudSyncEngine(GObject.Object):
         Se llama una vez por cada `start()` real (no en los no-op de llamadas
         repetidas) y trae todo lo que haya en Supabase ahora mismo, fila por fila,
         por los mismos `_apply_*` que usa el realtime — mismo last-write-wins por
-        `updated_at`. El orden de `_SYNCED_TABLES` ya deja "albums"/"playlists"
-        antes que "album_items"/"playlist_items", que dependen de que el padre ya
-        exista localmente."""
+        `updated_at`. El orden de `_SYNCED_TABLES` ya deja "sources"/"albums"/
+        "playlists" antes que "album_items"/"playlist_items", que dependen de que el
+        padre (o el track que resuelve la fuente) ya exista localmente."""
+        self._pull_tables(_SYNCED_TABLES, error_context="pull inicial")
+
+    def reconcile_pending(self) -> None:
+        """Reintenta las 4 tablas que dependen de que el track ya exista localmente
+        (ver `identity.resolve_local_track_id`) — un `album_items`/`track_mood`/etc.
+        que llegó por sync antes de que este dispositivo escaneara la fuente
+        correspondiente se descartaba para siempre (`_apply_*` devuelve sin aplicar
+        nada si no puede resolver el track). Se llama tras cada escaneo (ver
+        `ui/window.py:_on_sync_finished`) para que esos pendientes se apliquen apenas
+        el track aparece, sin esperar al próximo evento realtime o reinicio."""
+        if not cloud_client.is_logged_in_locally():
+            return
+        threading.Thread(
+            target=self._pull_tables, args=(_TRACK_DEPENDENT_TABLES,),
+            kwargs={"error_context": "reconciliación"}, daemon=True,
+        ).start()
+
+    def _pull_tables(self, tables: tuple[str, ...], error_context: str) -> None:
         try:
             client = cloud_client.get_client()
-            for table in _SYNCED_TABLES:
+            for table in tables:
                 rows = client.table(table).select("*").execute().data
                 for record in rows:
                     GLib.idle_add(self._apply_remote_event, table, record)
         except Exception as exc:
-            GLib.idle_add(self.emit, "sync-error", f"pull inicial: {exc}")
+            GLib.idle_add(self.emit, "sync-error", f"{error_context}: {exc}")
 
     def _realtime_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -205,6 +234,24 @@ class CloudSyncEngine(GObject.Object):
 
 
 # --- Push: un handler por tabla, arma el payload remoto y lo manda -----------
+
+
+def _push_source(client, payload: dict) -> None:
+    if payload.get("deleted"):
+        client.table("sources").update({"deleted_at": _now_iso()}).eq(
+            "uuid", payload["uuid"]
+        ).execute()
+        return
+    client.table("sources").upsert(
+        {
+            "uuid": payload["uuid"],
+            "drive_folder_id": payload["drive_folder_id"],
+            "display_name": payload["display_name"],
+            "updated_at": _now_iso(),
+            "deleted_at": None,
+        },
+        on_conflict="uuid",
+    ).execute()
 
 
 def _push_playlist(client, payload: dict) -> None:
@@ -326,6 +373,7 @@ def _push_track_play(client, payload: dict) -> None:
 
 
 _PUSH_HANDLERS = {
+    "sources": _push_source,
     "playlists": _push_playlist,
     "playlist_items": _push_playlist_item,
     "albums": _push_album,
@@ -338,6 +386,68 @@ _PUSH_HANDLERS = {
 # --- Pull: un handler por tabla, aplica el registro remoto a SQLite local ----
 # Nunca llaman a `_enqueue_sync_op` (evitan el eco push→pull→push) y respetan
 # last-write-wins comparando `updated_at` antes de pisar una fila local.
+
+
+def _apply_source(conn, record: dict, engine) -> str | None:
+    source_uuid = record.get("uuid")
+    if not source_uuid:
+        return None
+    local = conn.execute(
+        "SELECT id, updated_at, drive_folder_id FROM sources WHERE uuid = ?", (source_uuid,)
+    ).fetchone()
+    if local is None:
+        # Backfill viejo sin `uuid` en Supabase todavía (ver _backfill_source_uuids):
+        # si ya existe localmente por `drive_folder_id`, es la misma fuente, no una
+        # nueva — la casamos por ahí para no duplicarla ni disparar un escaneo de más.
+        local = conn.execute(
+            "SELECT id, updated_at, drive_folder_id FROM sources WHERE drive_folder_id = ?",
+            (record.get("drive_folder_id"),),
+        ).fetchone()
+    incoming_ts = record.get("updated_at") or record.get("deleted_at")
+    if local is not None and not _is_newer_or_equal(incoming_ts, local["updated_at"]):
+        return None
+
+    if record.get("deleted_at"):
+        if local is not None:
+            conn.execute("DELETE FROM tracks WHERE source_id = ?", (local["id"],))
+            conn.execute(
+                "UPDATE sources SET uuid = ?, deleted_at = ?, updated_at = ? WHERE id = ?",
+                (source_uuid, record["deleted_at"], incoming_ts, local["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO sources (uuid, drive_folder_id, display_name, deleted_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (source_uuid, record.get("drive_folder_id", ""), record.get("display_name", ""),
+                 record["deleted_at"], incoming_ts),
+            )
+        conn.commit()
+        return "sources-changed"
+
+    is_new = local is None
+    if is_new:
+        conn.execute(
+            "INSERT INTO sources (uuid, drive_folder_id, display_name, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (source_uuid, record["drive_folder_id"], record.get("display_name", ""), incoming_ts),
+        )
+    else:
+        conn.execute(
+            "UPDATE sources SET uuid = ?, display_name = ?, deleted_at = NULL, updated_at = ? "
+            "WHERE id = ?",
+            (source_uuid, record.get("display_name", ""), incoming_ts, local["id"]),
+        )
+    conn.commit()
+
+    if is_new and is_authenticated():
+        # Ya hay credenciales de Drive válidas acá (llegaron solas al loguearse, ver
+        # cloud/vault.py:sync_after_login, o de una conexión manual previa) — se puede
+        # escanear sin interrumpir al usuario. Si no, `get_credentials()` abriría un
+        # navegador para un OAuth interactivo desde un hilo de fondo sin que nadie lo
+        # pidiera; mejor dejar la fuente sin escanear hasta que el usuario conecte
+        # Drive o la actualice a mano desde Fuentes.
+        engine.emit("source-scan-requested", record["drive_folder_id"], record.get("display_name", ""))
+    return "sources-changed"
 
 
 def _apply_playlist(conn, record: dict, engine) -> str | None:
@@ -584,6 +694,7 @@ def _apply_track_play(conn, record: dict, engine) -> str | None:
 
 
 _APPLY_HANDLERS = {
+    "sources": _apply_source,
     "playlists": _apply_playlist,
     "playlist_items": _apply_playlist_item,
     "albums": _apply_album,

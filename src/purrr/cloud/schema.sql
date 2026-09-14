@@ -42,6 +42,29 @@ alter table playlist_items enable row level security;
 create policy "playlist_items_owner_all" on playlist_items
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- --- Fuentes (carpetas de Drive agregadas) --------------------------------
+-- Sincroniza solo el puntero a la carpeta, no la tabla `tracks` completa: cada
+-- dispositivo deriva sus propios tracks de su propio escaneo (`drive_file_id` ya es
+-- un identificador global, ver cloud/identity.py), pero antes de este cambio cada
+-- dispositivo tenía que agregar a mano las mismas carpetas — un álbum sincronizado
+-- que referenciara una canción de una carpeta no agregada acá se descartaba en
+-- silencio para siempre. Con esto, agregar una carpeta en un dispositivo la
+-- propaga a los demás, que la escanean solos (ver cloud/sync_engine.py:_apply_source).
+
+create table if not exists sources (
+    uuid              uuid primary key,
+    user_id           uuid not null references auth.users(id) on delete cascade default auth.uid(),
+    drive_folder_id   text not null,
+    display_name      text not null,
+    updated_at        timestamptz not null default now(),
+    deleted_at        timestamptz
+);
+
+alter table sources enable row level security;
+
+create policy "sources_owner_all" on sources
+    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- --- Álbumes -----------------------------------------------------------
 
 create table if not exists albums (
@@ -175,6 +198,7 @@ create policy "avatars_owner_all" on storage.objects
 -- los clientes suscriptos (cloud/sync_engine.py) — no incluye credential_vault, que
 -- se trae solo al loguearse (pull), no en tiempo real.
 
+alter publication supabase_realtime add table sources;
 alter publication supabase_realtime add table playlists;
 alter publication supabase_realtime add table playlist_items;
 alter publication supabase_realtime add table albums;

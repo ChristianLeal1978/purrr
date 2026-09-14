@@ -2,11 +2,14 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS sources (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid              TEXT,
     provider          TEXT NOT NULL DEFAULT 'drive',
     drive_folder_id   TEXT NOT NULL UNIQUE,
     display_name      TEXT NOT NULL,
     added_at          TEXT NOT NULL DEFAULT (datetime('now')),
-    last_scanned_at   TEXT
+    last_scanned_at   TEXT,
+    updated_at        TEXT,
+    deleted_at        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tracks (
