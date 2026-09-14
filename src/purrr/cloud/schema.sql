@@ -9,6 +9,12 @@
 -- proyecto nuevo. Todas las tablas usan Row Level Security con `auth.uid()`, así que
 -- el anon key por sí solo no alcanza para leer ni escribir nada: cada usuario solo ve
 -- sus propias filas, autenticado con su propia cuenta Purrr.
+--
+-- Pensado para volver a correrse entero cada vez que este archivo gane una tabla
+-- nueva (no solo al aprovisionar) — cada `create policy` va precedido de un `drop
+-- policy if exists` (Postgres no tiene `create policy if not exists`) y las
+-- `alter publication` van en un bloque que chequea antes de agregar, por la misma
+-- razón. El resto (`create table`, `alter table add column`) ya era idempotente.
 
 create extension if not exists "pgcrypto";
 
@@ -24,6 +30,7 @@ create table if not exists playlists (
 
 alter table playlists enable row level security;
 
+drop policy if exists "playlists_owner_all" on playlists;
 create policy "playlists_owner_all" on playlists
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -39,6 +46,7 @@ create table if not exists playlist_items (
 
 alter table playlist_items enable row level security;
 
+drop policy if exists "playlist_items_owner_all" on playlist_items;
 create policy "playlist_items_owner_all" on playlist_items
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -62,6 +70,7 @@ create table if not exists sources (
 
 alter table sources enable row level security;
 
+drop policy if exists "sources_owner_all" on sources;
 create policy "sources_owner_all" on sources
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -82,6 +91,7 @@ alter table albums add column if not exists art_storage_path text;
 
 alter table albums enable row level security;
 
+drop policy if exists "albums_owner_all" on albums;
 create policy "albums_owner_all" on albums
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -96,6 +106,7 @@ create table if not exists album_items (
 
 alter table album_items enable row level security;
 
+drop policy if exists "album_items_owner_all" on album_items;
 create policy "album_items_owner_all" on album_items
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -115,6 +126,7 @@ create table if not exists credential_vault (
 
 alter table credential_vault enable row level security;
 
+drop policy if exists "credential_vault_owner_all" on credential_vault;
 create policy "credential_vault_owner_all" on credential_vault
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -136,6 +148,7 @@ create table if not exists track_moods (
 
 alter table track_moods enable row level security;
 
+drop policy if exists "track_moods_owner_all" on track_moods;
 create policy "track_moods_owner_all" on track_moods
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -156,6 +169,7 @@ create table if not exists track_plays (
 
 alter table track_plays enable row level security;
 
+drop policy if exists "track_plays_owner_all" on track_plays;
 create policy "track_plays_owner_all" on track_plays
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -171,6 +185,7 @@ create policy "track_plays_owner_all" on track_plays
 insert into storage.buckets (id, name, public) values ('covers', 'covers', false)
     on conflict (id) do nothing;
 
+drop policy if exists "covers_authenticated_all" on storage.objects;
 create policy "covers_authenticated_all" on storage.objects
     for all using (bucket_id = 'covers' and auth.role() = 'authenticated')
     with check (bucket_id = 'covers' and auth.role() = 'authenticated');
@@ -189,6 +204,7 @@ create policy "covers_authenticated_all" on storage.objects
 insert into storage.buckets (id, name, public) values ('avatars', 'avatars', false)
     on conflict (id) do nothing;
 
+drop policy if exists "avatars_owner_all" on storage.objects;
 create policy "avatars_owner_all" on storage.objects
     for all using (bucket_id = 'avatars' and auth.uid()::text = split_part(name, '.', 1))
     with check (bucket_id = 'avatars' and auth.uid()::text = split_part(name, '.', 1));
@@ -198,10 +214,20 @@ create policy "avatars_owner_all" on storage.objects
 -- los clientes suscriptos (cloud/sync_engine.py) — no incluye credential_vault, que
 -- se trae solo al loguearse (pull), no en tiempo real.
 
-alter publication supabase_realtime add table sources;
-alter publication supabase_realtime add table playlists;
-alter publication supabase_realtime add table playlist_items;
-alter publication supabase_realtime add table albums;
-alter publication supabase_realtime add table album_items;
-alter publication supabase_realtime add table track_moods;
-alter publication supabase_realtime add table track_plays;
+do $$
+declare
+    table_name text;
+begin
+    foreach table_name in array array[
+        'sources', 'playlists', 'playlist_items', 'albums', 'album_items',
+        'track_moods', 'track_plays'
+    ]
+    loop
+        if not exists (
+            select 1 from pg_publication_tables
+            where pubname = 'supabase_realtime' and tablename = table_name
+        ) then
+            execute format('alter publication supabase_realtime add table %I', table_name);
+        end if;
+    end loop;
+end $$;
