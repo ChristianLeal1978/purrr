@@ -121,6 +121,36 @@ CREATE TABLE IF NOT EXISTS album_tracks (
 CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_album_tracks_track ON album_tracks(track_id);
 
+-- Combinación manual de 2+ álbumes en una sola tarjeta (Ctrl+clic > "Combinar" en la
+-- vista Álbumes), no destructiva: los álbumes miembro y sus canciones no se tocan,
+-- solo se agrupan/desagrupan acá. Ver database.py "Grupos de álbumes".
+CREATE TABLE IF NOT EXISTS album_groups (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid          TEXT NOT NULL UNIQUE,
+    art_path      TEXT,
+    art_is_custom INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS album_group_members (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id    INTEGER NOT NULL REFERENCES album_groups(id) ON DELETE CASCADE,
+    album_id    INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,
+    added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+-- El orden (CD1 antes que CD2...) dentro de un grupo activo.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_album_group_members_unique_pos
+    ON album_group_members(group_id, position) WHERE deleted_at IS NULL;
+-- Un álbum no puede estar en dos grupos activos a la vez.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_album_group_members_unique_album
+    ON album_group_members(album_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_album_group_members_group ON album_group_members(group_id);
+
 -- Vector de ánimo de un track de Drive (Fase 5), calculado una vez localmente con
 -- essentia-tensorflow (ver mood/analyzer.py) y sincronizado entre dispositivos (no
 -- hace falta `deleted_at`: un vector no se borra, se recalcula si hiciera falta).

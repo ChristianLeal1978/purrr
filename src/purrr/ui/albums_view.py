@@ -24,6 +24,7 @@ class AlbumObject(GObject.Object):
     def __init__(self, row):
         super().__init__()
         self.album_id: int = row["id"]
+        self.kind: str = row["kind"]  # "album" (armado a mano) o "group" (combinado, ver "Combinar")
         self.album: str = row["album"]
         self.display_artist: str = row["display_artist"] or "Artista desconocido"
         self.year: int | None = row["year"]
@@ -47,21 +48,24 @@ class AlbumsView(Gtk.Box):
     tarjeta muestra un botón para buscarla en internet."""
 
     __gsignals__ = {
-        "album-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
+        "album-activated": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),  # kind, id
         "album-art-search-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str, str)),
-        # album_id, album name, display_artist
+        # album_id, album name, display_artist (solo álbumes sueltos, no combinados)
         "album-rescan-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
-        "album-art-upload-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
-        "album-delete-requested": (GObject.SignalFlags.RUN_FIRST, None, (int, str)),  # album_id, album name
-        "album-selected": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # album_id
+        "album-art-upload-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),  # kind, id
+        "album-delete-requested": (GObject.SignalFlags.RUN_FIRST, None, (str, int, str)),  # kind, id, nombre
+        "album-selected": (GObject.SignalFlags.RUN_FIRST, None, (str, int)),  # kind, id
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # track_id
+        "albums-combine-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),  # list[int] album_ids
+        "album-group-split-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),  # group_id
     }
 
-    def __init__(self):
+    def __init__(self, tracks_panel_position: int = 560):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self._tracks_panel_position = tracks_panel_position
         self._sort_key = "artist"
         self._now_playing_track_id: int | None = None
-        self._selected_album_id: int | None = None
+        self._selected_key: tuple[str, int] | None = None
         # True cuando el usuario cerró el panel a mano con el botón de abajo mientras un
         # álbum seguía seleccionado — refresh() (llamado tras cada scan/sync) lo respeta
         # en vez de reabrirlo solo; ver refresh() y _on_grid_selection_changed().
@@ -69,11 +73,12 @@ class AlbumsView(Gtk.Box):
         self._store = Gio.ListStore(item_type=AlbumObject)
         self._sorter = Gtk.CustomSorter.new(self._compare_albums)
         self._sort_model = Gtk.SortListModel(model=self._store, sorter=self._sorter)
-        # autoselect=False: si no, apenas se llena la grilla (cada refresh()) quedaría
-        # seleccionado el primer álbum solo, mostrando sus canciones sin que el usuario
-        # haya tocado nada — mismo motivo que ya documenta folder_view.py para su árbol.
-        self._grid_selection = Gtk.SingleSelection(model=self._sort_model, autoselect=False)
-        self._grid_selection.connect("notify::selected-item", self._on_grid_selection_changed)
+        # MultiSelection (no SingleSelection): habilita Ctrl/Shift+clic gratis para elegir
+        # varias tarjetas y combinarlas (mismo cambio que ya usan library_view.py/
+        # playlist_view.py). El panel de canciones de abajo solo se actualiza cuando la
+        # selección tiene exactamente una tarjeta — ver _on_grid_selection_changed.
+        self._grid_selection = Gtk.MultiSelection(model=self._sort_model)
+        self._grid_selection.connect("selection-changed", self._on_grid_selection_changed)
 
         header = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
@@ -141,24 +146,31 @@ class AlbumsView(Gtk.Box):
         self._paned.set_end_child(self._tracks_box)
         self._paned.set_resize_end_child(True)
         self._paned.set_shrink_end_child(True)
-        self._paned.set_position(320)
+        self._paned.set_position(self._tracks_panel_position)
         self.append(self._paned)
+
+    def get_tracks_panel_position(self) -> int:
+        """Alto actual del divisor grilla/canciones, para que window.py lo persista
+        (esta vista no importa `database` directamente, ver arriba)."""
+        return self._paned.get_position()
 
     def refresh(self, album_rows) -> None:
         # Cada scan/sync en background llama a refresh() para traer datos frescos de la
         # base — antes esto colapsaba el panel de canciones incondicionalmente, cerrando
         # de golpe el álbum que el usuario tenía abierto. Ahora se reintenta reseleccionar
         # el mismo álbum (si sigue existiendo) para que el panel quede como estaba.
-        previous_id = self._selected_album_id
+        # Se compara por (kind, id): un album_id y un group_id pueden coincidir en
+        # número siendo autoincrementales de tablas distintas.
+        previous_key = self._selected_key
         self._store.splice(0, self._store.get_n_items(), [AlbumObject(row) for row in album_rows])
-        if previous_id is not None:
+        if previous_key is not None:
             for i in range(self._sort_model.get_n_items()):
                 album = self._sort_model.get_item(i)
-                if album.album_id == previous_id:
-                    self._grid_selection.set_selected(i)
+                if (album.kind, album.album_id) == previous_key:
+                    self._grid_selection.select_item(i, True)
                     return
-        self._grid_selection.set_selected(Gtk.INVALID_LIST_POSITION)
-        self._selected_album_id = None
+        self._grid_selection.unselect_all()
+        self._selected_key = None
         self._tracks_manually_hidden = False
         self._collapse_tracks_panel()
 
@@ -175,7 +187,7 @@ class AlbumsView(Gtk.Box):
         )
 
     def _on_tracks_toggle_clicked(self, _button: Gtk.Button) -> None:
-        if self._selected_album_id is None:
+        if self._selected_key is None:
             return
         visible = not self._tracks_box.get_visible()
         self._tracks_manually_hidden = not visible
@@ -282,7 +294,14 @@ class AlbumsView(Gtk.Box):
             if album.has_art() else None
         )
         picture.set_paintable(texture)
-        list_item.purrr_art_button.set_visible(not album.has_art())
+        # Buscar carátula en internet es una acción por álbum de verdad (guarda el
+        # archivo con el album_id crudo como nombre) — se oculta en una tarjeta
+        # combinada para no pisar por accidente la carátula de un álbum miembro.
+        list_item.purrr_art_button.set_visible(not album.has_art() and album.kind == "album")
+        if album.kind == "group":
+            picture.add_css_class("purrr-album-art-combined")
+        else:
+            picture.remove_css_class("purrr-album-art-combined")
 
         title.set_text(album.album)
         artist.set_text(album.display_artist)
@@ -294,40 +313,76 @@ class AlbumsView(Gtk.Box):
 
     def _on_album_context_menu(self, list_item: Gtk.ListItem, widget: Gtk.Widget, x: float, y: float) -> None:
         album: AlbumObject = list_item.get_item()
-        show_context_menu(
-            widget, x, y,
-            [
-                (
-                    "Revisar carpeta por canciones nuevas",
-                    lambda: self.emit("album-rescan-requested", album.album_id),
-                ),
-                (
-                    "Cargar imagen como carátula",
-                    lambda: self.emit("album-art-upload-requested", album.album_id),
-                ),
-                (
-                    "Eliminar de la biblioteca",
-                    lambda: self.emit("album-delete-requested", album.album_id, album.album),
-                ),
-            ],
-        )
+        position = list_item.get_position()
+        bitset = self._grid_selection.get_selection()
+        # Si el clic derecho cae en una tarjeta que ya forma parte de una selección
+        # múltiple, la acción aplica a toda la selección; si no, solo a esa tarjeta
+        # (mismo patrón que library_view.py:_on_track_context_menu).
+        if bitset.get_size() > 1 and bitset.contains(position):
+            selected = self.get_selected_albums()
+        else:
+            selected = [album]
+
+        if len(selected) == 1:
+            show_context_menu(widget, x, y, self._single_album_menu_items(selected[0]))
+            return
+
+        if all(a.kind == "album" for a in selected):
+            # En orden de grilla (ya ordenada por artista/título/año): así "CD1" queda
+            # antes que "CD2" sin lógica extra de disco.
+            album_ids = [a.album_id for a in selected]
+            show_context_menu(
+                widget, x, y,
+                [("Combinar", lambda: self.emit("albums-combine-requested", album_ids))],
+            )
+        # Selección mixta (incluye una tarjeta ya combinada) o 2+ grupos: sin acción
+        # propia todavía — separar el/los grupo/s primero.
+
+    def _single_album_menu_items(self, album: "AlbumObject") -> list[tuple[str, object]]:
+        if album.kind == "group":
+            return [
+                ("Cargar imagen como carátula", lambda: self.emit("album-art-upload-requested", "group", album.album_id)),
+                ("Separar", lambda: self.emit("album-group-split-requested", album.album_id)),
+                ("Eliminar de la biblioteca", lambda: self.emit("album-delete-requested", "group", album.album_id, album.album)),
+            ]
+        return [
+            ("Revisar carpeta por canciones nuevas", lambda: self.emit("album-rescan-requested", album.album_id)),
+            ("Cargar imagen como carátula", lambda: self.emit("album-art-upload-requested", "album", album.album_id)),
+            ("Eliminar de la biblioteca", lambda: self.emit("album-delete-requested", "album", album.album_id, album.album)),
+        ]
 
     def _on_activate(self, _view, position: int) -> None:
         # `position` es un índice del modelo que ve el GridView (el ordenado), no del store crudo.
         album: AlbumObject = self._sort_model.get_item(position)
-        self.emit("album-activated", album.album_id)
+        self.emit("album-activated", album.kind, album.album_id)
 
-    def _on_grid_selection_changed(self, selection: Gtk.SingleSelection, _pspec) -> None:
-        album: AlbumObject | None = selection.get_selected_item()
-        if album is None:
+    def get_selected_albums(self) -> list["AlbumObject"]:
+        bitset = self._grid_selection.get_selection()
+        return [
+            self._sort_model.get_item(i)
+            for i in range(self._sort_model.get_n_items())
+            if bitset.contains(i)
+        ]
+
+    def _on_grid_selection_changed(self, _selection: Gtk.MultiSelection, _position: int, _n_items: int) -> None:
+        selected = self.get_selected_albums()
+        # El panel de canciones de abajo solo tiene sentido con una tarjeta elegida —
+        # con 0 (deselección) o 2+ (el usuario está armando una combinación) se colapsa,
+        # mismo criterio que ya usaba el estado "sin selección" de antes.
+        if len(selected) != 1:
+            self._selected_key = None
+            self._tracks_manually_hidden = False
+            self._collapse_tracks_panel()
             return
+        album = selected[0]
+        key = (album.kind, album.album_id)
         # Elegir un álbum nuevo siempre reabre el panel aunque el usuario lo haya cerrado a
         # mano antes; una reselección del MISMO álbum (la que hace refresh() tras un scan)
         # no toca ese estado — ver el comentario en refresh().
-        if album.album_id != self._selected_album_id:
+        if key != self._selected_key:
             self._tracks_manually_hidden = False
-        self._selected_album_id = album.album_id
-        self.emit("album-selected", album.album_id)
+        self._selected_key = key
+        self.emit("album-selected", album.kind, album.album_id)
 
     def _on_track_activated(self, _view, position: int) -> None:
         track: TrackObject = self._track_store.get_item(position)
