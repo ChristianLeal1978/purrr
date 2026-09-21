@@ -60,8 +60,9 @@ def _folder_name(folder_path: str | None) -> str | None:
 class PurrrWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.set_default_size(1280, 800)
+        self._restore_window_geometry()
         self.set_title("Purrr")
+        self.connect("close-request", self._on_close_request)
 
         self._engine = PlayerEngine()
         self._queue = PlayQueue()
@@ -270,6 +271,23 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.refresh(database.list_albums())
         self._sidebar.refresh_playlists(database.list_playlists())
         self._sources_view.refresh_sources(database.list_sources())
+
+    def _restore_window_geometry(self) -> None:
+        """GTK4 no permite fijar la posición de la ventana (la maneja el compositor,
+        sobre todo en Wayland), así que solo recordamos tamaño y estado maximizado —
+        se guardan en `_on_close_request` y se restauran acá, antes del primer `present()`."""
+        width = int(database.get_state("window_width", "1600"))
+        height = int(database.get_state("window_height", "900"))
+        self.set_default_size(width, height)
+        if database.get_state("window_maximized", "0") == "1":
+            self.maximize()
+
+    def _on_close_request(self, _window) -> bool:
+        database.set_state("window_maximized", "1" if self.is_maximized() else "0")
+        if not self.is_maximized():
+            database.set_state("window_width", str(self.get_width()))
+            database.set_state("window_height", str(self.get_height()))
+        return False
 
     def _restore_last_view(self) -> None:
         """Vuelve a abrir la sección (y, si era Carpetas, la carpeta puntual) donde estaba el

@@ -61,6 +61,11 @@ class AlbumsView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self._sort_key = "artist"
         self._now_playing_track_id: int | None = None
+        self._selected_album_id: int | None = None
+        # True cuando el usuario cerró el panel a mano con el botón de abajo mientras un
+        # álbum seguía seleccionado — refresh() (llamado tras cada scan/sync) lo respeta
+        # en vez de reabrirlo solo; ver refresh() y _on_grid_selection_changed().
+        self._tracks_manually_hidden = False
         self._store = Gio.ListStore(item_type=AlbumObject)
         self._sorter = Gtk.CustomSorter.new(self._compare_albums)
         self._sort_model = Gtk.SortListModel(model=self._store, sorter=self._sorter)
@@ -78,6 +83,16 @@ class AlbumsView(Gtk.Box):
         self._sort_dropdown = Gtk.DropDown.new_from_strings([label for _key, label in _SORT_OPTIONS])
         self._sort_dropdown.connect("notify::selected", self._on_sort_changed)
         header.append(self._sort_dropdown)
+
+        spacer = Gtk.Box(hexpand=True)
+        header.append(spacer)
+
+        self._tracks_toggle_button = Gtk.Button(icon_name="pan-down-symbolic", sensitive=False)
+        self._tracks_toggle_button.add_css_class("flat")
+        self._tracks_toggle_button.set_tooltip_text("Mostrar la lista de canciones")
+        self._tracks_toggle_button.connect("clicked", self._on_tracks_toggle_clicked)
+        header.append(self._tracks_toggle_button)
+
         self.append(header)
 
         factory = Gtk.SignalListItemFactory()
@@ -130,12 +145,41 @@ class AlbumsView(Gtk.Box):
         self.append(self._paned)
 
     def refresh(self, album_rows) -> None:
+        # Cada scan/sync en background llama a refresh() para traer datos frescos de la
+        # base — antes esto colapsaba el panel de canciones incondicionalmente, cerrando
+        # de golpe el álbum que el usuario tenía abierto. Ahora se reintenta reseleccionar
+        # el mismo álbum (si sigue existiendo) para que el panel quede como estaba.
+        previous_id = self._selected_album_id
         self._store.splice(0, self._store.get_n_items(), [AlbumObject(row) for row in album_rows])
+        if previous_id is not None:
+            for i in range(self._sort_model.get_n_items()):
+                album = self._sort_model.get_item(i)
+                if album.album_id == previous_id:
+                    self._grid_selection.set_selected(i)
+                    return
+        self._grid_selection.set_selected(Gtk.INVALID_LIST_POSITION)
+        self._selected_album_id = None
+        self._tracks_manually_hidden = False
         self._collapse_tracks_panel()
 
     def _collapse_tracks_panel(self) -> None:
         self._track_store.remove_all()
-        self._tracks_box.set_visible(False)
+        self._tracks_toggle_button.set_sensitive(False)
+        self._set_tracks_visible(False)
+
+    def _set_tracks_visible(self, visible: bool) -> None:
+        self._tracks_box.set_visible(visible)
+        self._tracks_toggle_button.set_icon_name("pan-up-symbolic" if visible else "pan-down-symbolic")
+        self._tracks_toggle_button.set_tooltip_text(
+            "Ocultar la lista de canciones" if visible else "Mostrar la lista de canciones"
+        )
+
+    def _on_tracks_toggle_clicked(self, _button: Gtk.Button) -> None:
+        if self._selected_album_id is None:
+            return
+        visible = not self._tracks_box.get_visible()
+        self._tracks_manually_hidden = not visible
+        self._set_tracks_visible(visible)
 
     def show_tracks(self, track_rows) -> None:
         """Llamado por window.py en respuesta a "album-selected", con las canciones de
@@ -146,7 +190,9 @@ class AlbumsView(Gtk.Box):
         apply_now_playing(self._track_store, self._now_playing_track_id)
         self._track_view.set_visible(bool(tracks))
         self._tracks_empty_label.set_visible(not tracks)
-        self._tracks_box.set_visible(True)
+        self._tracks_toggle_button.set_sensitive(True)
+        if not self._tracks_manually_hidden:
+            self._set_tracks_visible(True)
 
     def get_visible_tracks(self) -> list[TrackObject]:
         return [self._track_store.get_item(i) for i in range(self._track_store.get_n_items())]
@@ -273,8 +319,15 @@ class AlbumsView(Gtk.Box):
 
     def _on_grid_selection_changed(self, selection: Gtk.SingleSelection, _pspec) -> None:
         album: AlbumObject | None = selection.get_selected_item()
-        if album is not None:
-            self.emit("album-selected", album.album_id)
+        if album is None:
+            return
+        # Elegir un álbum nuevo siempre reabre el panel aunque el usuario lo haya cerrado a
+        # mano antes; una reselección del MISMO álbum (la que hace refresh() tras un scan)
+        # no toca ese estado — ver el comentario en refresh().
+        if album.album_id != self._selected_album_id:
+            self._tracks_manually_hidden = False
+        self._selected_album_id = album.album_id
+        self.emit("album-selected", album.album_id)
 
     def _on_track_activated(self, _view, position: int) -> None:
         track: TrackObject = self._track_store.get_item(position)
