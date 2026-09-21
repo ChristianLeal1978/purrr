@@ -110,6 +110,42 @@ drop policy if exists "album_items_owner_all" on album_items;
 create policy "album_items_owner_all" on album_items
     for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- --- Álbumes combinados ("Combinar" en la vista Álbumes) ------------------
+-- Ctrl+clic + "Combinar" agrupa 2+ álbumes en una sola tarjeta sin tocar sus
+-- canciones ni fusionarlos (ver db/schema.sql y db/database.py "Grupos de
+-- álbumes") — acá solo se sincroniza qué álbumes integran cada grupo y en qué
+-- orden, más una carátula propia opcional para la tarjeta combinada.
+
+create table if not exists album_groups (
+    uuid              uuid primary key,
+    user_id           uuid not null references auth.users(id) on delete cascade default auth.uid(),
+    art_storage_path  text,
+    updated_at        timestamptz not null default now(),
+    deleted_at        timestamptz
+);
+
+alter table album_groups enable row level security;
+
+drop policy if exists "album_groups_owner_all" on album_groups;
+create policy "album_groups_owner_all" on album_groups
+    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create table if not exists album_group_members (
+    group_uuid  uuid not null references album_groups(uuid) on delete cascade,
+    album_uuid  uuid not null references albums(uuid) on delete cascade,
+    user_id     uuid not null references auth.users(id) on delete cascade default auth.uid(),
+    position    integer not null,
+    updated_at  timestamptz not null default now(),
+    deleted_at  timestamptz,
+    primary key (group_uuid, album_uuid)
+);
+
+alter table album_group_members enable row level security;
+
+drop policy if exists "album_group_members_owner_all" on album_group_members;
+create policy "album_group_members_owner_all" on album_group_members
+    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- --- Bóveda de credenciales (Fase 1.5) -----------------------------------
 -- `ciphertext` es un token Fernet (AES + HMAC autenticado) generado en el cliente
 -- con `cloud/vault.py` — Supabase nunca ve la credencial en texto plano, ni la
@@ -220,7 +256,7 @@ declare
 begin
     foreach table_name in array array[
         'sources', 'playlists', 'playlist_items', 'albums', 'album_items',
-        'track_moods', 'track_plays'
+        'album_groups', 'album_group_members', 'track_moods', 'track_plays'
     ]
     loop
         if not exists (

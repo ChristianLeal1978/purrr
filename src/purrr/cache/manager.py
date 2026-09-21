@@ -37,6 +37,17 @@ def save_album_art_bytes(data: bytes, album_id: int, ext: str = ".jpg") -> Path:
     return path
 
 
+def save_album_group_art_bytes(data: bytes, group_id: int, ext: str = ".jpg") -> Path:
+    """Igual que `save_album_art_bytes`, pero para la carátula propia de una tarjeta de
+    álbumes combinados (ver purrr.db.database.update_album_group_art) — el prefijo
+    "group-" evita que un group_id y un album_id numéricamente iguales pisen el mismo
+    archivo."""
+    path = ALBUM_ART_CACHE_DIR / f"group-{group_id}{ext}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
 def save_spotify_art_bytes(data: bytes, spotify_track_id: str, ext: str = ".jpg") -> Path:
     """Igual que `save_album_art_bytes`, pero para la miniatura de un track de Spotify
     agregado a una playlist mixta (ver purrr.spotify.client)."""

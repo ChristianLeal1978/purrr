@@ -115,6 +115,11 @@ headerbar.flat {
     border-color: @purrr_accent_hover;
 }
 
+/* Tarjeta de álbumes combinados (Ctrl+clic + "Combinar" en la vista Álbumes). */
+.purrr-album-art-combined {
+    border: 2px solid @purrr_accent_hover;
+}
+
 .purrr-station-tile-scrim {
     background-color: alpha(#000, 0.5);
 }

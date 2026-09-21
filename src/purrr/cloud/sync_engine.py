@@ -39,8 +39,8 @@ from purrr.config import SUPABASE_ANON_KEY, SUPABASE_URL
 from purrr.db import database
 
 _SYNCED_TABLES = (
-    "sources", "playlists", "playlist_items", "albums", "album_items", "track_moods",
-    "track_plays",
+    "sources", "playlists", "playlist_items", "albums", "album_items", "album_groups",
+    "album_group_members", "track_moods", "track_plays",
 )
 # Subconjunto de _SYNCED_TABLES que depende de que el track exista localmente para
 # resolverse (ver identity.resolve_local_track_id) — lo que reintenta `reconcile_pending`
@@ -347,6 +347,40 @@ def _push_album_item(client, payload: dict) -> None:
     ).execute()
 
 
+def _push_album_group(client, payload: dict) -> None:
+    """Mismo patrón que `_push_album` — un grupo combinado ("Combinar" en la vista
+    Álbumes) es solo una carátula propia opcional, no tiene nombre/artista propios
+    (esos se derivan siempre del primer miembro, ver database.list_albums_and_groups)."""
+    if payload.get("deleted"):
+        client.table("album_groups").update({"deleted_at": _now_iso()}).eq(
+            "uuid", payload["uuid"]
+        ).execute()
+        return
+    row = {"uuid": payload["uuid"], "updated_at": _now_iso(), "deleted_at": None}
+    art_local_path = payload.get("art_local_path")
+    if art_local_path and Path(art_local_path).exists():
+        row["art_storage_path"] = _upload_album_art(client, payload["uuid"], art_local_path)
+    client.table("album_groups").upsert(row, on_conflict="uuid").execute()
+
+
+def _push_album_group_member(client, payload: dict) -> None:
+    if payload.get("deleted"):
+        client.table("album_group_members").update({"deleted_at": _now_iso()}).eq(
+            "group_uuid", payload["group_uuid"]
+        ).eq("album_uuid", payload["album_uuid"]).execute()
+        return
+    client.table("album_group_members").upsert(
+        {
+            "group_uuid": payload["group_uuid"],
+            "album_uuid": payload["album_uuid"],
+            "position": payload["position"],
+            "updated_at": _now_iso(),
+            "deleted_at": None,
+        },
+        on_conflict="group_uuid,album_uuid",
+    ).execute()
+
+
 def _push_track_mood(client, payload: dict) -> None:
     client.table("track_moods").upsert(
         {
@@ -378,6 +412,8 @@ _PUSH_HANDLERS = {
     "playlist_items": _push_playlist_item,
     "albums": _push_album,
     "album_items": _push_album_item,
+    "album_groups": _push_album_group,
+    "album_group_members": _push_album_group_member,
     "track_moods": _push_track_mood,
     "track_plays": _push_track_play,
 }
@@ -638,6 +674,104 @@ def _apply_album_item(conn, record: dict, engine) -> str | None:
     return "albums-changed"
 
 
+def _apply_album_group(conn, record: dict, engine) -> str | None:
+    group_uuid = record.get("uuid")
+    if not group_uuid:
+        return None
+    local = conn.execute(
+        "SELECT updated_at FROM album_groups WHERE uuid = ?", (group_uuid,)
+    ).fetchone()
+    incoming_ts = record.get("updated_at") or record.get("deleted_at")
+    if local is not None and not _is_newer_or_equal(incoming_ts, local["updated_at"]):
+        return None
+    if local is None:
+        conn.execute(
+            "INSERT INTO album_groups (uuid, updated_at, deleted_at) VALUES (?, ?, ?)",
+            (group_uuid, incoming_ts, record.get("deleted_at")),
+        )
+    else:
+        conn.execute(
+            "UPDATE album_groups SET updated_at = ?, deleted_at = ? WHERE uuid = ?",
+            (incoming_ts, record.get("deleted_at"), group_uuid),
+        )
+    conn.commit()
+
+    storage_path = record.get("art_storage_path")
+    if storage_path:
+        group_row = conn.execute(
+            "SELECT id FROM album_groups WHERE uuid = ?", (group_uuid,)
+        ).fetchone()
+        if group_row is not None:
+            threading.Thread(
+                target=_download_shared_group_art,
+                args=(group_row["id"], storage_path, engine),
+                daemon=True,
+            ).start()
+    return "albums-changed"
+
+
+def _download_shared_group_art(group_id: int, storage_path: str, engine) -> None:
+    """Igual que `_download_shared_album_art`, pero para la carátula propia de una
+    tarjeta de álbumes combinados."""
+    try:
+        data = cloud_client.get_client().storage.from_(_COVERS_BUCKET).download(storage_path)
+    except Exception:
+        return
+    ext = Path(storage_path).suffix or ".jpg"
+    path = cache_manager.save_album_group_art_bytes(data, group_id, ext)
+
+    def apply_locally() -> bool:
+        conn = database.get_connection()
+        conn.execute(
+            "UPDATE album_groups SET art_path = ?, art_is_custom = 1 WHERE id = ?",
+            (str(path), group_id),
+        )
+        conn.commit()
+        engine.emit("albums-changed")
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(apply_locally)
+
+
+def _apply_album_group_member(conn, record: dict, engine) -> str | None:
+    group_uuid, album_uuid = record.get("group_uuid"), record.get("album_uuid")
+    if not group_uuid or not album_uuid:
+        return None
+    group = conn.execute("SELECT id FROM album_groups WHERE uuid = ?", (group_uuid,)).fetchone()
+    album = conn.execute("SELECT id FROM albums WHERE uuid = ?", (album_uuid,)).fetchone()
+    if group is None or album is None:
+        # El grupo o el álbum todavía no llegaron por sync a este dispositivo — se
+        # resuelve solo en el próximo pull completo (mismo caso conocido que
+        # `_apply_album_item`/`_apply_playlist_item`).
+        return None
+    incoming_ts = record.get("updated_at") or record.get("deleted_at")
+    existing = conn.execute(
+        "SELECT id, updated_at FROM album_group_members WHERE group_id = ? AND album_id = ?",
+        (group["id"], album["id"]),
+    ).fetchone()
+    if existing is not None and not _is_newer_or_equal(incoming_ts, existing["updated_at"]):
+        return None
+    if record.get("deleted_at"):
+        if existing is not None:
+            conn.execute(
+                "UPDATE album_group_members SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                (record["deleted_at"], incoming_ts, existing["id"]),
+            )
+    elif existing is None:
+        conn.execute(
+            "INSERT INTO album_group_members (group_id, album_id, position, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (group["id"], album["id"], record.get("position", 0), incoming_ts),
+        )
+    else:
+        conn.execute(
+            "UPDATE album_group_members SET position = ?, updated_at = ?, deleted_at = NULL WHERE id = ?",
+            (record.get("position", 0), incoming_ts, existing["id"]),
+        )
+    conn.commit()
+    return "albums-changed"
+
+
 def _apply_track_mood(conn, record: dict, engine) -> str | None:
     """A diferencia de playlists/álbumes, nada en la UI necesita refrescarse en vivo
     por esto todavía — por eso no emite señal (`None`), solo aplica el guardado."""
@@ -699,6 +833,8 @@ _APPLY_HANDLERS = {
     "playlist_items": _apply_playlist_item,
     "albums": _apply_album,
     "album_items": _apply_album_item,
+    "album_groups": _apply_album_group,
+    "album_group_members": _apply_album_group_member,
     "track_moods": _apply_track_mood,
     "track_plays": _apply_track_play,
 }

@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import threading
 import uuid as uuid_lib
@@ -865,6 +866,194 @@ def list_album_tracks(album_id: int) -> list[sqlite3.Row]:
         """,
         (album_id,),
     ).fetchall()
+
+
+# --- Grupos de álbumes ---------------------------------------------------
+# Combinar 2+ álbumes armados a mano (p. ej. "R-Kive - CD1/CD2/CD3") en una sola
+# tarjeta, a pedido explícito del usuario (Ctrl+clic + "Combinar" en la grilla).
+# A diferencia de `merge_duplicate_albums` (que mueve canciones a un único álbum,
+# perdiendo de qué álbum venía cada una), acá los álbumes miembro y sus
+# `album_tracks` no se tocan — la tarjeta combinada es una capa liviana encima,
+# así "Separar" es trivial y sin pérdida: solo soft-deletea el grupo.
+
+_DISC_SUFFIX_RE = re.compile(r"\s*[-–—(]\s*(?:cd|disc|disco)\.?\s*\d+\s*\)?\s*$", re.IGNORECASE)
+
+
+def _strip_disc_suffix(name: str) -> str:
+    """Oculta un sufijo de disco al final del nombre para mostrar la tarjeta combinada
+    ("R-Kive - CD1" -> "R-Kive", "The Essentials (CD2)" -> "The Essentials"). Un nombre
+    sin ese patrón (como "The Lamb Lies Down on Broadway") queda intacto."""
+    return _DISC_SUFFIX_RE.sub("", name).strip()
+
+
+def _album_group_uuid(conn: sqlite3.Connection, group_id: int) -> str:
+    return conn.execute("SELECT uuid FROM album_groups WHERE id = ?", (group_id,)).fetchone()["uuid"]
+
+
+def combine_albums(album_ids: list[int]) -> int | None:
+    """Crea un grupo combinado con estos álbumes, en el orden recibido (define orden de
+    pistas y quién es "el primero" para carátula/nombre/artista). Devuelve el id del
+    grupo, o None sin crear nada si alguno de los álbumes ya está en un grupo activo."""
+    if len(album_ids) < 2:
+        return None
+    conn = get_connection()
+    placeholders = ",".join("?" * len(album_ids))
+    already_grouped = conn.execute(
+        f"SELECT 1 FROM album_group_members WHERE deleted_at IS NULL AND album_id IN ({placeholders})",
+        album_ids,
+    ).fetchone()
+    if already_grouped is not None:
+        return None
+
+    group_uuid = str(uuid_lib.uuid4())
+    cursor = conn.execute("INSERT INTO album_groups (uuid) VALUES (?)", (group_uuid,))
+    group_id = cursor.lastrowid
+    _enqueue_sync_op(conn, "album_groups", {"uuid": group_uuid})
+    for position, album_id in enumerate(album_ids):
+        conn.execute(
+            "INSERT INTO album_group_members (group_id, album_id, position) VALUES (?, ?, ?)",
+            (group_id, album_id, position),
+        )
+        album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (album_id,)).fetchone()
+        if album_row is not None:
+            _enqueue_sync_op(
+                conn, "album_group_members",
+                {"group_uuid": group_uuid, "album_uuid": album_row["uuid"], "position": position},
+            )
+    conn.commit()
+    return group_id
+
+
+def _album_group_member_rows(conn: sqlite3.Connection, group_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT id, album_id FROM album_group_members "
+        "WHERE group_id = ? AND deleted_at IS NULL ORDER BY position",
+        (group_id,),
+    ).fetchall()
+
+
+def split_album_group(group_id: int) -> None:
+    """Deshace la combinación: los álbumes miembro vuelven a mostrarse sueltos. Soft-delete
+    nada más — ni las canciones ni los álbumes originales se tocan."""
+    conn = get_connection()
+    group_row = conn.execute("SELECT uuid FROM album_groups WHERE id = ?", (group_id,)).fetchone()
+    if group_row is None:
+        return
+    for member in _album_group_member_rows(conn, group_id):
+        conn.execute(
+            "UPDATE album_group_members SET deleted_at = datetime('now'), updated_at = datetime('now') "
+            "WHERE id = ?",
+            (member["id"],),
+        )
+        album_row = conn.execute("SELECT uuid FROM albums WHERE id = ?", (member["album_id"],)).fetchone()
+        if album_row is not None:
+            _enqueue_sync_op(
+                conn, "album_group_members",
+                {"group_uuid": group_row["uuid"], "album_uuid": album_row["uuid"], "deleted": True},
+            )
+    conn.execute(
+        "UPDATE album_groups SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        (group_id,),
+    )
+    _enqueue_sync_op(conn, "album_groups", {"uuid": group_row["uuid"], "deleted": True})
+    conn.commit()
+
+
+def delete_album_group(group_id: int) -> None:
+    """"Eliminar" una tarjeta combinada: a diferencia de "Separar", borra también los
+    álbumes que agrupaba (mismo criterio que eliminar un álbum suelto)."""
+    conn = get_connection()
+    member_album_ids = [m["album_id"] for m in _album_group_member_rows(conn, group_id)]
+    split_album_group(group_id)
+    for album_id in member_album_ids:
+        delete_album(album_id)
+
+
+def list_album_group_members(group_id: int) -> list[sqlite3.Row]:
+    return get_connection().execute(
+        """
+        SELECT a.* FROM albums a
+        JOIN album_group_members m ON m.album_id = a.id AND m.deleted_at IS NULL
+        WHERE m.group_id = ? AND a.deleted_at IS NULL
+        ORDER BY m.position
+        """,
+        (group_id,),
+    ).fetchall()
+
+
+def list_album_group_tracks(group_id: int) -> list[sqlite3.Row]:
+    """Concatena las canciones de cada álbum miembro en orden (CD1, después CD2...) —
+    cada `list_album_tracks` ya ordena por disco/pista/título dentro de su álbum."""
+    tracks: list[sqlite3.Row] = []
+    for member in list_album_group_members(group_id):
+        tracks.extend(list_album_tracks(member["id"]))
+    return tracks
+
+
+def update_album_group_art(group_id: int, art_path: str) -> None:
+    """Carátula propia para la tarjeta combinada (mismo patrón que `update_album_art`) —
+    sin esto, se sigue mostrando la del primer álbum miembro."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE album_groups SET art_path = ?, art_is_custom = 1, updated_at = datetime('now') WHERE id = ?",
+        (art_path, group_id),
+    )
+    group_row = conn.execute("SELECT uuid FROM album_groups WHERE id = ?", (group_id,)).fetchone()
+    if group_row is not None:
+        _enqueue_sync_op(conn, "album_groups", {"uuid": group_row["uuid"], "art_local_path": art_path})
+    conn.commit()
+
+
+def list_albums_and_groups() -> list[dict]:
+    """Lo que consume la grilla de Álbumes: álbumes sueltos + una tarjeta sintética por
+    cada grupo combinado activo, en vez de sus miembros por separado."""
+    albums_by_id = {row["id"]: row for row in list_albums()}
+    conn = get_connection()
+    group_ids = [
+        row["id"] for row in conn.execute(
+            "SELECT id FROM album_groups WHERE deleted_at IS NULL"
+        ).fetchall()
+    ]
+
+    grouped_album_ids: set[int] = set()
+    group_cards: list[dict] = []
+    for group_id in group_ids:
+        member_ids = [m["album_id"] for m in _album_group_member_rows(conn, group_id)]
+        members = [albums_by_id[mid] for mid in member_ids if mid in albums_by_id]
+        if len(members) < 2:
+            # El resto de miembros no tiene canciones activas (o el grupo quedó con
+            # menos de 2 tras borrarse un álbum) — no vale la pena una tarjeta combinada.
+            continue
+        grouped_album_ids.update(member_ids)
+        first = members[0]
+        artists = {m["display_artist"] for m in members if m["display_artist"]}
+        group_row = conn.execute(
+            "SELECT art_path, art_is_custom FROM album_groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        art_path = (
+            group_row["art_path"]
+            if group_row is not None and group_row["art_is_custom"] and group_row["art_path"]
+            else first["art_path"]
+        )
+        group_cards.append({
+            "id": group_id,
+            "kind": "group",
+            "album": _strip_disc_suffix(first["album"]),
+            "display_artist": first["display_artist"] if len(artists) <= 1 else "Varios artistas",
+            "art_path": art_path,
+            "track_count": sum(m["track_count"] for m in members),
+            "year": first["year"],
+        })
+
+    album_cards = [
+        {
+            "id": row["id"], "kind": "album", "album": row["album"],
+            "display_artist": row["display_artist"], "art_path": row["art_path"],
+            "track_count": row["track_count"], "year": row["year"],
+        }
+        for row in albums_by_id.values() if row["id"] not in grouped_album_ids
+    ]
+    return album_cards + group_cards
 
 
 # --- Playlists -------------------------------------------------------------

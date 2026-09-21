@@ -11,7 +11,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from purrr.auth import spotify_oauth
 from purrr.auth.oauth import get_credentials, is_authenticated
-from purrr.cache.manager import save_album_art_bytes
+from purrr.cache.manager import save_album_art_bytes, save_album_group_art_bytes
 from purrr.cloud import client as cloud_client
 from purrr.cloud import vault as cloud_vault
 from purrr.cloud.sync_engine import CloudSyncEngine
@@ -91,7 +91,10 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sidebar = Sidebar()
         self._library_view = LibraryView()
         self._folder_view = FolderBrowserView()
-        self._albums_view = AlbumsView()
+        saved_tracks_panel_position = database.get_state("albums_tracks_panel_position")
+        self._albums_view = AlbumsView(
+            tracks_panel_position=int(saved_tracks_panel_position) if saved_tracks_panel_position else 560
+        )
         self._playlist_view = PlaylistView()
         self._sources_view = SourcesView()
         self._rainwave_view = SimpleStationsView("Rainwave", rainwave_source.list_stations())
@@ -156,18 +159,25 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._playback_bar.set_hexpand(False)
         self._playback_bar.set_vexpand(True)
 
-        body_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True, vexpand=True)
-        body_paned.set_start_child(split_view)
-        body_paned.set_resize_start_child(True)
-        body_paned.set_shrink_start_child(True)
-        body_paned.set_end_child(self._playback_bar)
-        body_paned.set_resize_end_child(False)
-        body_paned.set_shrink_end_child(False)
-        body_paned.set_position(960)
+        self._body_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True, vexpand=True)
+        self._body_paned.set_start_child(split_view)
+        self._body_paned.set_resize_start_child(True)
+        self._body_paned.set_shrink_start_child(True)
+        self._body_paned.set_end_child(self._playback_bar)
+        self._body_paned.set_resize_end_child(False)
+        self._body_paned.set_shrink_end_child(False)
+        # Sin una posición guardada (primera vez, o versiones previas que no la
+        # persistían), un valor fijo como 960 deja el panel de reproducción enorme en
+        # una ventana ancha restaurada (ver `_restore_window_geometry`) en vez de la
+        # franja angosta de siempre — por eso el resguardo se calcula relativo al
+        # ancho restaurado, dejándole al panel de reproducción su ancho mínimo habitual.
+        saved_position = database.get_state("body_paned_position")
+        default_position = max(600, self._restored_width - 280)
+        self._body_paned.set_position(int(saved_position) if saved_position else default_position)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header_bar)
-        toolbar_view.set_content(body_paned)
+        toolbar_view.set_content(self._body_paned)
 
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_child(toolbar_view)
@@ -205,6 +215,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._albums_view.connect("album-rescan-requested", self._on_album_rescan_requested)
         self._albums_view.connect("album-art-upload-requested", self._on_album_art_upload_requested)
         self._albums_view.connect("album-delete-requested", self._on_album_delete_requested)
+        self._albums_view.connect("albums-combine-requested", self._on_albums_combine_requested)
+        self._albums_view.connect("album-group-split-requested", self._on_album_group_split_requested)
 
         self._playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self._playlist_view.connect("remove-tracks-requested", self._on_remove_tracks_requested)
@@ -268,7 +280,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         # Corrige, si hace falta, álbumes que un bug ya arreglado partió en uno por artista
         # de pista (ver `_add_tracks_to_album_by_metadata`) — no-op si no hay duplicados.
         database.merge_duplicate_albums()
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         self._sidebar.refresh_playlists(database.list_playlists())
         self._sources_view.refresh_sources(database.list_sources())
 
@@ -278,6 +290,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         se guardan en `_on_close_request` y se restauran acá, antes del primer `present()`."""
         width = int(database.get_state("window_width", "1600"))
         height = int(database.get_state("window_height", "900"))
+        self._restored_width = width  # usado en _build_layout para el resguardo de _body_paned
         self.set_default_size(width, height)
         if database.get_state("window_maximized", "0") == "1":
             self.maximize()
@@ -287,6 +300,8 @@ class PurrrWindow(Adw.ApplicationWindow):
         if not self.is_maximized():
             database.set_state("window_width", str(self.get_width()))
             database.set_state("window_height", str(self.get_height()))
+        database.set_state("body_paned_position", str(self._body_paned.get_position()))
+        database.set_state("albums_tracks_panel_position", str(self._albums_view.get_tracks_panel_position()))
         return False
 
     def _restore_last_view(self) -> None:
@@ -517,13 +532,18 @@ class PurrrWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_album_activated(self, _view, album_id: int) -> None:
-        tracks = [LibraryTrackObject(row) for row in database.list_album_tracks(album_id)]
+    def _album_or_group_tracks(self, kind: str, item_id: int):
+        if kind == "group":
+            return database.list_album_group_tracks(item_id)
+        return database.list_album_tracks(item_id)
+
+    def _on_album_activated(self, _view, kind: str, item_id: int) -> None:
+        tracks = [LibraryTrackObject(row) for row in self._album_or_group_tracks(kind, item_id)]
         if tracks:
             self._play_from_track_list(tracks, tracks[0].track_id)
 
-    def _on_album_selected(self, _view, album_id: int) -> None:
-        self._albums_view.show_tracks(database.list_album_tracks(album_id))
+    def _on_album_selected(self, _view, kind: str, item_id: int) -> None:
+        self._albums_view.show_tracks(self._album_or_group_tracks(kind, item_id))
 
     def _on_albums_track_activated(self, _view, track_id: int) -> None:
         tracks = self._albums_view.get_visible_tracks()
@@ -576,7 +596,7 @@ class PurrrWindow(Adw.ApplicationWindow):
             album_id = database.get_or_create_album(name, display_artist)
             total_added += database.add_tracks_to_album(album_id, [t["id"] for t in tracks])
 
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         cancion_palabra = "canción" if total_added == 1 else "canciones"
         if len(groups) == 1:
             album_name = next(iter(groups))[0]
@@ -608,11 +628,11 @@ class PurrrWindow(Adw.ApplicationWindow):
             return
 
         added = database.add_tracks_to_album(album_id, new_ids)
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         cancion_palabra = "canción" if added == 1 else "canciones"
         self._toast(f'Se agregaron {added} {cancion_palabra} nuevas a "{album["name"]}".')
 
-    def _on_album_art_upload_requested(self, _view, album_id: int) -> None:
+    def _on_album_art_upload_requested(self, _view, kind: str, item_id: int) -> None:
         image_filter = Gtk.FileFilter(name="Imágenes")
         image_filter.add_mime_type("image/jpeg")
         image_filter.add_mime_type("image/png")
@@ -636,20 +656,46 @@ class PurrrWindow(Adw.ApplicationWindow):
             try:
                 data = Path(path).read_bytes()
                 ext = Path(path).suffix or ".jpg"
-                art_path = save_album_art_bytes(data, album_id, ext)
+                if kind == "group":
+                    art_path = save_album_group_art_bytes(data, item_id, ext)
+                else:
+                    art_path = save_album_art_bytes(data, item_id, ext)
             except OSError as exc:
                 self._toast(f"No se pudo cargar la imagen: {exc}")
                 return
-            database.update_album_art(album_id, str(art_path))
-            self._albums_view.refresh(database.list_albums())
+            if kind == "group":
+                database.update_album_group_art(item_id, str(art_path))
+            else:
+                database.update_album_art(item_id, str(art_path))
+            self._albums_view.refresh(database.list_albums_and_groups())
             self._toast("Carátula guardada.")
 
         dialog.open(self, None, on_open_finished)
 
-    def _on_album_delete_requested(self, _view, album_id: int, album_name: str) -> None:
+    def _on_album_delete_requested(self, _view, kind: str, item_id: int, album_name: str) -> None:
+        if kind == "group":
+
+            def on_confirm_group() -> None:
+                database.delete_album_group(item_id)
+                self._albums_view.refresh(database.list_albums_and_groups())
+                self._toast(f'"{album_name}" y los álbumes que combinaba se eliminaron de la biblioteca.')
+
+            confirm_action(
+                self,
+                heading="¿Eliminar álbumes combinados de la biblioteca?",
+                body=(
+                    f'"{album_name}" combina varios álbumes — se quitarán TODOS de tu biblioteca en '
+                    "este equipo y en el resto de tus dispositivos sincronizados. Los archivos de las "
+                    "canciones no se eliminan."
+                ),
+                confirm_label="Eliminar",
+                on_confirm=on_confirm_group,
+            )
+            return
+
         def on_confirm() -> None:
-            database.delete_album(album_id)
-            self._albums_view.refresh(database.list_albums())
+            database.delete_album(item_id)
+            self._albums_view.refresh(database.list_albums_and_groups())
             self._toast(f'"{album_name}" se eliminó de la biblioteca.')
 
         confirm_action(
@@ -662,6 +708,19 @@ class PurrrWindow(Adw.ApplicationWindow):
             confirm_label="Eliminar",
             on_confirm=on_confirm,
         )
+
+    def _on_albums_combine_requested(self, _view, album_ids: list[int]) -> None:
+        group_id = database.combine_albums(album_ids)
+        if group_id is None:
+            self._toast("Uno de los álbumes elegidos ya está combinado con otro.")
+            return
+        self._albums_view.refresh(database.list_albums_and_groups())
+        self._toast(f"{len(album_ids)} álbumes combinados.")
+
+    def _on_album_group_split_requested(self, _view, group_id: int) -> None:
+        database.split_album_group(group_id)
+        self._albums_view.refresh(database.list_albums_and_groups())
+        self._toast("Álbumes separados.")
 
     def _on_album_art_search_requested(self, _view, album_id: int, name: str, artist: str) -> None:
         term = f"{artist} {name}" if artist else name
@@ -710,7 +769,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_album_art_saved(self) -> bool:
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         self._toast("Carátula guardada.")
         return False
 
@@ -817,7 +876,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.refresh_sources(database.list_sources())
         self._library_view.refresh(database.list_tracks())
         self._folder_view.refresh(database.list_sources())
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
 
     def _on_sync_progress(self, _controller, stage: str, actual: int, total: int) -> None:
         self._sources_view.show_progress(stage, actual, total)
@@ -855,7 +914,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._track_updated_source_id = None
         self._library_view.refresh(database.list_tracks(filter_text=self._current_search_text))
         self._folder_view.refresh_current_folder()
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         if self._current_playlist_id is not None:
             self._on_playlist_selected(self._sidebar, self._current_playlist_id)
         return False
@@ -992,7 +1051,7 @@ class PurrrWindow(Adw.ApplicationWindow):
     def _flush_albums_refresh(self) -> bool:
         self._albums_refresh_pending = False
         database.merge_duplicate_albums()
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         return GLib.SOURCE_REMOVE
 
     def _on_cloud_sources_changed(self, _engine) -> None:
@@ -1006,7 +1065,7 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._sources_view.refresh_sources(database.list_sources())
         self._folder_view.refresh(database.list_sources())
         self._library_view.refresh(database.list_tracks())
-        self._albums_view.refresh(database.list_albums())
+        self._albums_view.refresh(database.list_albums_and_groups())
         return GLib.SOURCE_REMOVE
 
     def _on_cloud_source_scan_requested(self, _engine, folder_id: str, display_name: str) -> None:
