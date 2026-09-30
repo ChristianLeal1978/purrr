@@ -113,7 +113,12 @@ class PurrrWindow(Adw.ApplicationWindow):
         self._reload_all()
         self._restore_last_view()
         self._refresh_cloud_settings_view()
-        self._cloud_sync_engine.start()
+        if cloud_client.is_logged_in_locally():
+            self._cloud_sync_engine.start()
+        else:
+            # Sin sesión no hay nada que sincronizar: pedir login antes que nada.
+            self._on_cloud_selected(self._sidebar)
+            self._sidebar.select_cloud_row()
         GLib.timeout_add(1000, self._poll_sync_status)
 
     # --- Construcción de la UI --------------------------------------------

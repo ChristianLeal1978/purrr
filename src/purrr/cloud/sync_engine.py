@@ -199,6 +199,8 @@ class CloudSyncEngine(GObject.Object):
         # Propaga el JWT de la sesión al cliente async para que Realtime aplique las
         # mismas políticas RLS que ya protegen la API REST (ver cloud/schema.sql).
         await async_client.auth.set_session(session.access_token, session.refresh_token)
+        # Este cliente también rota el refresh_token; sin guardarlo, el archivo queda inválido.
+        async_client.auth.on_auth_state_change(cloud_client.persist_on_auth_event)
 
         channel = async_client.channel("purrr-sync")
         for table in _SYNCED_TABLES:

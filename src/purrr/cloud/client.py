@@ -13,6 +13,7 @@ from pathlib import Path
 
 from supabase import Client as SupabaseClient
 from supabase import create_client
+from supabase_auth.errors import AuthApiError, AuthSessionMissingError
 from supabase_auth.types import AuthResponse
 
 from purrr.config import SUPABASE_ANON_KEY, SUPABASE_SESSION_PATH, SUPABASE_URL
@@ -29,7 +30,17 @@ def get_client() -> SupabaseClient:
         return _client
     _client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     _restore_session(_client)
+    # Supabase rota el refresh_token en cada renovación (~1 h) y el anterior queda
+    # inválido: hay que reescribir el archivo cada vez o el próximo arranque falla.
+    _client.auth.on_auth_state_change(persist_on_auth_event)
     return _client
+
+
+def persist_on_auth_event(event: str, session) -> None:
+    """Callback de `on_auth_state_change`: guarda los tokens renovados. Sirve tanto
+    para el cliente sync como para el async del realtime (que también rota tokens)."""
+    if event in ("TOKEN_REFRESHED", "SIGNED_IN") and session is not None:
+        _write_session(session.access_token, session.refresh_token)
 
 
 def reset_client() -> None:
@@ -44,24 +55,26 @@ def _restore_session(client: SupabaseClient) -> None:
     try:
         data = json.loads(SUPABASE_SESSION_PATH.read_text())
         client.auth.set_session(data["access_token"], data["refresh_token"])
-    except Exception:
-        # Sesión guardada corrupta o expirada sin refresh_token válido: seguimos
-        # sin sesión, el usuario tendrá que loguearse de nuevo desde la UI.
+    except (AuthApiError, AuthSessionMissingError, KeyError, ValueError):
+        # Refresh_token rechazado por el servidor o archivo corrupto: sesión perdida de
+        # verdad, hay que loguearse de nuevo. Un fallo de red NO cae acá (no borrar la
+        # sesión por arrancar sin internet).
         SUPABASE_SESSION_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _write_session(access_token: str, refresh_token: str) -> None:
+    tmp = SUPABASE_SESSION_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"access_token": access_token, "refresh_token": refresh_token}))
+    os.chmod(tmp, 0o600)
+    tmp.replace(SUPABASE_SESSION_PATH)
 
 
 def _persist_session(response: AuthResponse) -> None:
     if response.session is None:
         return
-    SUPABASE_SESSION_PATH.write_text(
-        json.dumps(
-            {
-                "access_token": response.session.access_token,
-                "refresh_token": response.session.refresh_token,
-            }
-        )
-    )
-    os.chmod(SUPABASE_SESSION_PATH, 0o600)
+    _write_session(response.session.access_token, response.session.refresh_token)
 
 
 def sign_up(email: str, password: str, name: str | None = None) -> AuthResponse:
